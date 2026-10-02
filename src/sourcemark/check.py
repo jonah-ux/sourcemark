@@ -100,13 +100,26 @@ def _match_path(cited: str, session: Session, lines: set[int] | None = None) -> 
     while rel.startswith("./"):
         rel = rel[2:]  # drop a leading "./" prefix (lstrip would also eat ".claude" -> "claude")
     rel = os.path.normpath(rel)
-    joins = [os.path.normpath(os.path.join(d, cited_x)) for d in [session.cwd, *sorted(session.cwds)] if d]
-    for j in joins:
-        if j in observed:
-            return j
-    if any(os.path.isfile(j) for j in joins):
-        # The path names a real file in the agent's own working tree that it never read:
-        # do not bind it to a same-named file somewhere else.
+    def coverage(p: str) -> int:
+        if not lines:
+            return 0
+        cov: set[int] = set()
+        for o in session.for_path(p):
+            cov |= o.covered()
+        return len(cov & lines)
+
+    # Where the session ended up comes first: that is where its answer was written.
+    dirs = list(dict.fromkeys(d for d in [session.last_cwd, session.cwd, *sorted(session.cwds)] if d))
+    joins = [os.path.normpath(os.path.join(d, cited_x)) for d in dirs]
+    seen_joins = [j for j in joins if j in observed]
+    if seen_joins:
+        # Several working directories hold a read copy: prefer the one whose reads cover the lines.
+        return max(seen_joins, key=lambda j: (coverage(j), -seen_joins.index(j)))
+    home = [os.path.normpath(os.path.join(d, cited_x)) for d in {session.cwd, session.last_cwd} if d]
+    if any(os.path.isfile(j) for j in home):
+        # The path names a real file in the agent's own working tree (where it started or
+        # ended up) that it never read: do not bind it to a same-named file somewhere else.
+        # A directory merely visited along the way is not "its" tree.
         return None
     hits = [p for p in observed if p == rel or p.endswith(os.sep + rel)]
     if len(hits) == 1:
@@ -114,14 +127,6 @@ def _match_path(cited: str, session: Session, lines: set[int] | None = None) -> 
     if hits:
         # Ambiguous (e.g. a repo and its worktree copy): prefer the copy whose reads cover
         # the cited lines, then the shortest path.
-        def coverage(p: str) -> int:
-            if not lines:
-                return 0
-            cov: set[int] = set()
-            for o in session.for_path(p):
-                cov |= o.covered()
-            return len(cov & lines)
-
         return sorted(hits, key=lambda p: (-coverage(p), len(p)))[0]
     return None
 
@@ -205,11 +210,11 @@ def _judge_lines(c: Citation, obs: list, out: CitationCheck) -> str:
     cited = set(range(c.line_start, (c.line_end or c.line_start) + 1))
     out.lines_cited = len(cited)
     out.lines_read = len(cited & covered)
+    if out.lines_read == len(cited):
+        return "verified"  # seen; a later, shorter read of an edited file does not unsee it
     if total is not None and c.line_start > total:
         out.detail = f"file had {total} lines when read"
         return "out_of_range"
-    if out.lines_read == len(cited):
-        return "verified"
     if out.lines_read:
         return "partial"
     near = sorted(covered, key=lambda n: abs(n - c.line_start))[:1]
