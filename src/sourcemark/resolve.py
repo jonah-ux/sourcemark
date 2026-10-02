@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable
 
 from .anchor import Mark
-from .locate import DISTINCTIVE_CHARS, Match, locate
+from .locate import DISTINCTIVE_CHARS, EXACT_CONTEXT_MIN, Match, locate
 from .textnorm import fingerprint, line_offsets, normalize_newlines, offset_to_line
 
 STATUSES = ("intact", "shifted", "moved", "edited", "orphaned", "unverifiable")
@@ -37,8 +37,11 @@ _BOILERPLATE = re.compile(
     r"^\s*(?:import\s|from\s+\S+\s+import\s|#include\b|#!|use\s|package\s|require\(|"
     r"export\s+\*|[}\])]+[;,]?\s*$|(?:end|pass|else:?|return;?)\s*$)"
 )
+# Comment lines: license headers and banners are copied into every file of a project.
+_COMMENT = re.compile(r"^\s*(?:#|//|/\*|\*|--|<!--|;|%)")
 OTHER_FILE_DISTINCTIVE = 48
 MAX_SEARCH_FILES = 50
+FUZZY_SEARCH_FILES = 5
 
 
 @dataclass
@@ -112,7 +115,11 @@ def _distinctive_lines(exact: str, n: int = 3) -> list[str]:
 
 def _boilerplate(exact: str) -> bool:
     lines = [ln for ln in exact.split("\n") if ln.strip()]
-    return bool(lines) and all(_BOILERPLATE.match(ln) for ln in lines)
+    if not lines:
+        return False
+    if all(_BOILERPLATE.match(ln) for ln in lines):
+        return True
+    return len(lines) >= 2 and all(_BOILERPLATE.match(ln) or _COMMENT.match(ln) for ln in lines)
 
 
 def search_roots(roots: Iterable[str], exact: str, exclude: set[str]) -> list[str]:
@@ -206,6 +213,7 @@ def resolve(
                 mark.quote.get("suffix") or "",
                 hint_start=mark.position.get("start") if path == original else None,
                 fuzzy=allow_fuzzy,
+                unique_when_marked=mark.position.get("occurrences", 1) <= 1,
             )
         if m is None:
             return False
@@ -213,13 +221,15 @@ def resolve(
             # A file found by searching (not a git rename) holds the same citation only when
             # the quote is distinctive, the only copy under the roots, or its surroundings
             # moved with it. Boilerplate appears in many files.
-            distinctive = (
+            boiler = _boilerplate(exact)
+            distinctive = not boiler and (
                 len(exact.strip()) >= OTHER_FILE_DISTINCTIVE
                 or exact.count("\n") >= 2
-                or (unique and len(exact.strip()) >= DISTINCTIVE_CHARS and not _boilerplate(exact))
+                or (unique and len(exact.strip()) >= DISTINCTIVE_CHARS)
             )
             worst = _ctx_worst(doc, m, mark)
-            if not distinctive and worst < MIN_CONTEXT_FOR_SHORT:
+            # Boilerplate needs its real surroundings to have moved with it, not a look-alike.
+            if not distinctive and worst < (EXACT_CONTEXT_MIN if boiler else MIN_CONTEXT_FOR_SHORT):
                 res.notes.append(f"rejected non-distinctive hit in {path}")
                 return False
         offs = line_offsets(doc)
@@ -229,6 +239,21 @@ def resolve(
         res.line_start = offset_to_line(offs, m.start)
         res.line_end = offset_to_line(offs, max(m.start, m.end - 1))
         res.similarity, res.context_score, res.method = m.similarity, m.context_score, m.method
+        return True
+
+    def pick_best(cands: list[str], allow_fuzzy: bool, unique: bool) -> bool:
+        """Try every candidate and keep the one whose surroundings agree most, not the first
+        hit: an identical decoy elsewhere must not win over the real moved file."""
+        nonlocal res
+        best_r: Resolution | None = None
+        for c in cands:
+            if attempt(c, allow_fuzzy=allow_fuzzy, searched=True, unique=unique):
+                if best_r is None or (res.similarity, res.context_score) > (best_r.similarity, best_r.context_score):
+                    best_r = Resolution(**res.to_dict())
+        if best_r is None:
+            return False
+        best_r.candidates_checked, best_r.notes = res.candidates_checked, res.notes
+        res = best_r
         return True
 
     def done() -> Resolution:
@@ -261,10 +286,9 @@ def resolve(
     if best is not None and exact is not None and search:
         excl = {os.path.abspath(p) for p in seen}
         found = search_roots(roots, exact, excl)
-        for c in found:
-            if attempt(c, allow_fuzzy=False, searched=True, unique=len(found) == 1):
-                res.notes.append("exact copy elsewhere preferred over fuzzy match in original")
-                return done()
+        if pick_best(found, allow_fuzzy=False, unique=len(found) == 1):
+            res.notes.append("exact copy elsewhere preferred over fuzzy match in original")
+            return done()
     if best is not None:
         best.candidates_checked = res.candidates_checked
         best.notes = res.notes
@@ -277,7 +301,7 @@ def resolve(
         res.notes.append("quote was redacted; only the original position can be verified")
     elif search:
         found = search_roots(roots, exact, {os.path.abspath(p) for p in seen})
-        for c in found:
-            if attempt(c, searched=True, unique=len(found) == 1):
-                break
+        if not pick_best(found, allow_fuzzy=False, unique=len(found) == 1):
+            # Fuzzy only on the best-ranked few: each fuzzy pass reads and scores a whole file.
+            pick_best(found[:FUZZY_SEARCH_FILES], allow_fuzzy=True, unique=len(found) == 1)
     return done()

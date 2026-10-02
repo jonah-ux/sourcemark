@@ -119,7 +119,9 @@ def mark_text(
         "quote_loose": loose_fingerprint(exact),
         "document": sha256_hex(doc),
     }
-    position = {"start": start, "end": end, "line_start": line_start, "line_end": line_end}
+    # How often the quote occurred when cited: a duplicate that later becomes the only copy
+    # is not evidence that the cited one survived.
+    position = {"start": start, "end": end, "line_start": line_start, "line_end": line_end, "occurrences": doc.count(exact)}
     src = {k: v for k, v in asdict(source).items() if v is not None}
     identity = {
         "kind": "text",
