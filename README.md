@@ -90,12 +90,14 @@ A citation stores several independent ways to find the text again — the exact 
 
 ## Measured, not assumed
 
-Evaluated against real-world source files and real agent sessions (synthetic fixtures ship in `tests/`):
+Evaluated against real source files, real git history and real agent sessions. Synthetic fixtures ship in `tests/`.
 
-- **Anchors**: ~1,550 mutation cases per seed (insertions, deletions, in-place edits, reindents, git renames, untracked moves, cut/paste, decoy duplicates) on 30 real-world files: **96.7%** (seed 1) and **96.6%** (held-out seed 2) correct on status *and* line *and* file, median **25 ms** per resolve. Generic one-liners that leave their file are reported `orphaned` on purpose rather than guessed.
-- **Citation checks**: 120 real agent sessions, three seeds, with injected known-good and known-bad citations: **100%** of bad citations caught and **0** good ones flagged on every seed; median **3 ms** per session, p95 65–271 ms.
-- **Database values**: 40 citations across 4 live production tables, re-resolved against an independent raw read: **100%** agreement.
-- **Adversarial review**: three independent reviewers attacked the checker, the resolver, redaction and the ledger. Every reproduced finding (false passes first) is now a regression test.
+- **Anchors through real git history:** 4,691 marks replayed through real commits of four repositories (edits, insertions, renames, deletions), checked against a line alignment of the two versions. **99.5%** correct on status and line; 100% of lines that did not change are found. Median **0.6 ms** per resolve.
+- **Anchors under synthetic mutation:** about 1,550 cases per seed on 30 real files (insertions, deletions, in-place edits, reindents, git renames, untracked moves, cut/paste, decoy duplicates). **97.3%** (seed 1) and **97.4%** (held-out seed 2).
+- **Citation checks on Claude Code sessions:** about 2,900 sessions, with near-miss citations injected next to real evidence (a neighbouring unread line, a range running one line past what was read, a changed word in a quote, an unread file with the same name, a mutated URL). **0.00%** of good citations flagged and **99.9%** of the bad ones caught.
+- **Citation checks on Codex rollouts:** about 3,000 rollouts, 47,000 real citations and 8,300 injected near-misses. **0.00%** of good citations flagged, every near-miss kind caught, median **26 ms** per session.
+- **Database values:** 40 citations across 4 live production tables, re-resolved against an independent raw read: **100%** agreement.
+- **Adversarial review:** three independent reviewers attacked the checker, the resolver, redaction and the ledger. Every reproduced finding is now a regression test, as is every failure found by the benchmarks.
 
 ## Agent usage
 
