@@ -165,3 +165,28 @@ class PathNormalizationTest(unittest.TestCase):
         self.assertEqual(check_text("see ~/.config/tool/settings.toml:2", sess).checks[0].verdict, "verified")
         self.assertEqual(check_text("see .config/tool/settings.toml:2", sess).checks[0].verdict, "verified")
         self.assertEqual(check_text(f"see {home}/.config/tool/settings.toml:3", sess).checks[0].verdict, "verified")
+
+
+class DelegatedEvidenceTest(unittest.TestCase):
+    def test_subagent_reads_are_delegated(self):
+        d = tempfile.mkdtemp(prefix="sm-deleg-")
+        try:
+            target = os.path.join(d, "schema.sql")
+            with open(target, "w") as fh:
+                fh.write("\n".join(f"col_{i} text," for i in range(1, 60)) + "\n")
+            main = os.path.join(d, "sess.jsonl")
+            with open(main, "w") as fh:
+                fh.write(json.dumps({"type": "user", "cwd": d, "message": {"content": "what is in the schema?"}}) + "\n")
+                fh.write(json.dumps(say(f"The column is defined at {target}:49.")) + "\n")
+            os.makedirs(os.path.join(d, "sess", "subagents"))
+            lines = "\n".join(f"col_{i} text," for i in range(40, 60))
+            with open(os.path.join(d, "sess", "subagents", "agent-x.jsonl"), "w") as fh:
+                fh.write(json.dumps(tool_use(1, "Read", {"file_path": target})) + "\n")
+                fh.write(json.dumps(tool_result(1, {"type": "text", "file": {"filePath": target, "content": lines, "startLine": 40, "numLines": 20, "totalLines": 59}})) + "\n")
+            sess, texts = read_claude_transcript(main)
+            rep = check_text(texts[-1][1], sess)
+            self.assertEqual(rep.checks[0].verdict, "delegated")
+            sess2, texts2 = read_claude_transcript(main, subagents=False)
+            self.assertEqual(check_text(texts2[-1][1], sess2).checks[0].verdict, "unread_file")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
