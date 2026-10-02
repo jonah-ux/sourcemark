@@ -8,7 +8,7 @@
     },
     {
       "path": "src/sourcemark/hooks.py",
-      "sha256": "10d8a4d1d3ce5495296d7c60f5f518ef41cb5cc7a00ea726a1b8c78b5ad2de20"
+      "sha256": "f0b92d4836092c4ffc0b878fe2f0e1adceb73c9e86baae802d17a0b02eb4da1b"
     },
     {
       "path": "tests/test_ledger_hooks.py",
@@ -20,10 +20,10 @@
   ],
   "why_trace": {
     "verdict": "GENUINE_BUG",
-    "root_cause": "verify-ledger did not cover the event timestamp in the hash, did not detect deleted mark rows or a rewritten token index, and the public append() let a caller re-vouch an edited mark body with a second mark event.",
+    "root_cause": "When the hook's ledger could not be opened, tokens were reported token_unchecked (not failing), so an enforce-mode Stop hook let an unbacked [sm:...] token through silently.",
     "evidence": [
-      "tests/test_ledger_hooks.py LedgerTamperRound2Test reproduces each tampering; all now fail verification",
-      "the reviewer's own script reports TAMPERED for T1-T3 and append() refuses T4"
+      "tests/test_check.py AdversarialRound3DelegatedTokenTest.test_check_command_fails_an_unknown_token_without_a_ledger",
+      "hooks.stop now substitutes UnavailableLedger so tokens are unknown_token (failing)"
     ]
   },
   "documentation": [
@@ -31,5 +31,5 @@
     "src/sourcemark/ledger.py",
     "src/sourcemark/hooks.py"
   ],
-  "source_commit": "17418c1b66939dc085831421ca23a68077bcc84b"
+  "source_commit": "1f67fe51b26a772881a79b510cf977a748d48c18"
 }
