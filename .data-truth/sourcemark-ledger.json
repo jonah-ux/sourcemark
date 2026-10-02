@@ -8,7 +8,7 @@
     },
     {
       "path": "src/sourcemark/hooks.py",
-      "sha256": "bf21ce24067b5f351e80fc31ad4bc8f1aeefe77c1f16bab53bfe56cb7b305278"
+      "sha256": "c86ad4f0dea0e6e2960923c93b0d96395c6de455d39f42025a130da1b306ddc5"
     },
     {
       "path": "tests/test_ledger_hooks.py",
@@ -20,11 +20,11 @@
   ],
   "why_trace": {
     "verdict": "GENUINE_BUG",
-    "root_cause": "A live enforce-mode agent run showed the Stop hook reading the transcript before the final reply was flushed, and quote checks attributing one claim's code span to neighbouring citations.",
+    "root_cause": "An independent adversarial review showed unsupported citations passing enforcement: unresolved paths and invented [sm:] tokens were not failing verdicts, and the hook never consulted the ledger for tokens.",
     "evidence": [
-      "Live headless run: first Stop check saw 0 citations, the second saw 22; settled re-read added",
-      "Same run: 10 quote_mismatch false flags fell to 0 after nearest-citation attribution and expression-only quote checks (24/24 verified)",
-      "Benchmark 3 iteration 6: 100% detection, 0.43% false-flag rate on injected citations"
+      "tests/test_check.py StrictnessTest reproduces each finding",
+      "Three live enforce-mode agent answers still verify 24/24, 19/19, 12/12 with 15 quotes checked",
+      "Transcript benchmark: 100% detection, 0.36% false flags over 188 real citations"
     ]
   },
   "documentation": [
@@ -32,5 +32,5 @@
     "src/sourcemark/ledger.py",
     "src/sourcemark/hooks.py"
   ],
-  "source_commit": "fec5f9c0067f9ba248cd3c53ad20d0afadf09d61"
+  "source_commit": "ca9c0397d6cad46282341c21838a15882383b6b0"
 }

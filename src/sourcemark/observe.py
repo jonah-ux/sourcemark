@@ -478,11 +478,15 @@ def normalize_url(url: str) -> str:
     url = url.split("#", 1)[0]
     if "?" in url:
         base, q = url.split("?", 1)
-        keep = [kv for kv in q.split("&") if not kv.lower().startswith(("utm_", "ref=", "fbclid=", "gclid="))]
+        keep = [kv for kv in q.split("&") if not kv.lower().startswith(("utm_", "fbclid=", "gclid="))]
         url = base + ("?" + "&".join(keep) if keep else "")
-    url = re.sub(r"^http://", "https://", url)
-    url = re.sub(r"^https://www\.", "https://", url)
-    return url.rstrip("/").lower()
+    url = re.sub(r"^http://", "https://", url, flags=re.I)
+    m = re.match(r"^(https://)([^/?]+)(.*)$", url, flags=re.I)
+    if m:  # scheme and host are case-insensitive; path and query are not
+        host = m.group(2).lower()
+        host = host[4:] if host.startswith("www.") else host
+        url = "https://" + host + m.group(3)
+    return url.rstrip("/")
 
 
 def urls_in(value: Any) -> set[str]:

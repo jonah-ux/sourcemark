@@ -16,6 +16,8 @@ Verdicts (per citation):
 * ``url_unsourced``  a link that never appeared in any fetch/search this session
 * ``delegated``      only a subagent read it; the citation is relayed, not first-hand
 * ``endpoint``       a local/private service address (localhost, LAN, CGNAT): not a source citation
+* ``token_ok`` / ``token_stale`` / ``unknown_token`` / ``token_unchecked``  an ``[sm:…]`` token that
+                     resolves / no longer resolves / is not in the ledger / could not be looked up
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from .cite import Citation, extract
 from .observe import Session, normalize_url
 from .textnorm import squash
 
-PASSING = {"verified", "file_only", "url_verified"}
+PASSING = {"verified", "file_only", "url_verified", "token_ok"}
 # Only code EXPRESSIONS are checked as quotes. A bare identifier or dotted name
 # (`content_hash`, `c.text`) is usually a reference to a concept, not a quotation.
 _CODEISH = re.compile(r"\s|[()=\[\]{}<>;,'\"+*]|->|=>")
@@ -98,10 +100,14 @@ def _match_path(cited: str, session: Session, lines: set[int] | None = None) -> 
     while rel.startswith("./"):
         rel = rel[2:]  # drop a leading "./" prefix (lstrip would also eat ".claude" -> "claude")
     rel = os.path.normpath(rel)
-    if session.cwd:
-        joined = os.path.normpath(os.path.join(session.cwd, cited_x))
-        if joined in observed:
-            return joined
+    joins = [os.path.normpath(os.path.join(d, cited_x)) for d in [session.cwd, *sorted(session.cwds)] if d]
+    for j in joins:
+        if j in observed:
+            return j
+    if any(os.path.isfile(j) for j in joins):
+        # The path names a real file in the agent's own working tree that it never read:
+        # do not bind it to a same-named file somewhere else.
+        return None
     hits = [p for p in observed if p == rel or p.endswith(os.sep + rel)]
     if len(hits) == 1:
         return hits[0]
@@ -121,13 +127,18 @@ def _match_path(cited: str, session: Session, lines: set[int] | None = None) -> 
 
 
 def _is_local_endpoint(url: str) -> bool:
+    """A local/private SERVICE address. A document path on a private host is still a citation."""
     import ipaddress
     from urllib.parse import urlsplit
 
     try:
-        host = (urlsplit(url).hostname or "").lower()
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
     except ValueError:
         return False
+    last = parts.path.rstrip("/").rsplit("/", 1)[-1]
+    if re.search(r"\.[A-Za-z0-9]{1,8}$", last):
+        return False  # ".../q3/report.pdf" names a document, not an endpoint
     if host in ("localhost", "0.0.0.0") or host.endswith((".local", ".localhost", ".internal", ".lan")):
         return True
     try:
@@ -173,6 +184,17 @@ def _file_lines(path: str) -> list[str] | None:
         return None
 
 
+def _in_order(hay: str, parts: list[str]) -> bool:
+    """Every fragment present, in the order written."""
+    pos = 0
+    for p in parts:
+        i = hay.find(p, pos)
+        if i < 0:
+            return False
+        pos = i + len(p)
+    return True
+
+
 def _judge_lines(c: Citation, obs: list, out: CitationCheck) -> str:
     """Line-coverage verdict for a citation against a set of observations of one file."""
     covered: set[int] = set()
@@ -196,10 +218,26 @@ def _judge_lines(c: Citation, obs: list, out: CitationCheck) -> str:
     return "unread_lines"
 
 
-def check_citation(c: Citation, session: Session, *, now: bool = False) -> CitationCheck:
+def check_citation(c: Citation, session: Session, *, now: bool = False, ledger: Any = None) -> CitationCheck:
     out = CitationCheck(raw=c.raw, verdict="nonexistent", path=c.path, line_start=c.line_start, line_end=c.line_end)
     if c.token:
-        out.verdict, out.detail = "unknown_token", "token lookup requires a mark ledger"
+        if ledger is None:
+            out.verdict, out.detail = "token_unchecked", "no ledger supplied to look the token up"
+            return out
+        mark = ledger.get_mark(c.token)
+        if mark is None:
+            out.verdict, out.detail = "unknown_token", "no mark with this token in the ledger"
+            return out
+        out.path = mark.source.get("path") or mark.source.get("table")
+        if mark.kind == "text":
+            from .resolve import resolve
+
+            res = resolve(mark, search=False)
+            out.resolved_path, out.line_start, out.line_end = res.path, res.line_start, res.line_end
+            out.verdict = "token_ok" if res.status in ("intact", "shifted", "moved") else "token_stale"
+            out.detail = f"mark resolves {res.status}"
+        else:
+            out.verdict, out.detail = "token_ok", "database mark exists (resolve with a DSN to check drift)"
         return out
     if c.url:
         if _is_local_endpoint(c.url):
@@ -209,7 +247,7 @@ def check_citation(c: Citation, session: Session, *, now: bool = False) -> Citat
         u = normalize_url(c.url)
         out.path = c.url
         def seen(urls: set[str]) -> bool:
-            return u in urls or any(s.startswith(u + "/") or u.startswith(s + "/") for s in urls)
+            return u in urls  # exact (normalized) match only; a parent or child page is a different source
 
         if seen(session.urls):
             out.verdict = "url_verified"
@@ -266,7 +304,7 @@ def check_citation(c: Citation, session: Session, *, now: bool = False) -> Citat
     if out.verdict in ("verified", "partial") and c.claimed_quotes:
         window: list[str] = []
         for o in obs:
-            for n in range(c.line_start - 2, (c.line_end or c.line_start) + 3):
+            for n in range(c.line_start - 1, (c.line_end or c.line_start) + 2):
                 t = o.text_at(n)
                 if t is not None:
                     window.append(t)
@@ -278,13 +316,15 @@ def check_citation(c: Citation, session: Session, *, now: bool = False) -> Citat
             # "foo(...)" / "a … b": the agent elided text; every remaining fragment must be present.
             parts = [squash(p) for p in re.split(r"\.\.\.|…", q)]
             parts = [p for p in parts if len(p) >= 3]
-            if parts and all(p in hay for p in parts):
+            if parts and _in_order(hay, parts):
                 out.quotes_found += 1
-        if out.quotes_checked and not out.quotes_found:
+        if out.quotes_checked and out.quotes_found < out.quotes_checked:
             out.verdict = "quote_mismatch"
-            out.detail = "quoted code not found in the cited lines as read"
+            missing = out.quotes_checked - out.quotes_found
+            out.detail = f"{missing} quoted expression(s) not found in the cited lines as read"
 
     if now:
+        cited = set(range(c.line_start, (c.line_end or c.line_start) + 1))
         lines = _file_lines(hit)
         if lines is not None:
             changed = False
@@ -297,10 +337,10 @@ def check_citation(c: Citation, session: Session, *, now: bool = False) -> Citat
     return out
 
 
-def check_text(text: str, session: Session, *, now: bool = False) -> Report:
+def check_text(text: str, session: Session, *, now: bool = False, ledger: Any = None) -> Report:
     rep = Report()
     for c in extract(text, known_names=session.basenames()):
-        rep.checks.append(check_citation(c, session, now=now))
+        rep.checks.append(check_citation(c, session, now=now, ledger=ledger))
     return rep
 
 

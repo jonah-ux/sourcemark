@@ -300,3 +300,80 @@ class EvidenceIntegrityTest(unittest.TestCase):
         self.assertEqual(v, ["verified"])
         v = self.run_calls([("Bash", {"command": "cat -s src/a.py"}, {"stdout": "line 1\n", "stderr": ""}, "", False)], "See src/a.py:1.")
         self.assertNotIn("verified", v)
+
+
+class StrictnessTest(unittest.TestCase):
+    """Regression tests for adversarial findings in the checker."""
+
+    def sess_with(self, path, start, lines, cwd):
+        from sourcemark.observe import Observation
+        s = Session(cwd=cwd)
+        s.add(Observation(path, start, lines, "Read"))
+        return s
+
+    def test_exact_url_matching(self):
+        s = Session()
+        s.urls.update({"https://github.com", "https://docs.example.com/guide/install/linux", "https://x.com/r?ref=v1", "https://x.com/p?id=ABC"})
+        v = lambda t: check_text(t, s).checks[0].verdict
+        self.assertEqual(v("see https://github.com/torvalds/linux/blob/master/kernel/fabricated.c"), "url_unsourced")
+        self.assertEqual(v("see https://docs.example.com/guide"), "url_unsourced")
+        self.assertEqual(v("see https://x.com/r?ref=v2"), "url_unsourced")
+        self.assertEqual(v("see https://x.com/p?id=abc"), "url_unsourced")
+        self.assertEqual(v("see https://x.com/p?id=ABC"), "url_verified")
+
+    def test_urls_in_parens_and_angles_are_extracted(self):
+        got = [c.url for c in extract("(https://fabricated.example/x) and <https://other.example/y>")]
+        self.assertEqual(got, ["https://fabricated.example/x", "https://other.example/y"])
+
+    def test_private_document_is_not_an_endpoint(self):
+        s = Session()
+        self.assertEqual(check_text("see https://reports.internal/q3/fabricated.pdf", s).checks[0].verdict, "url_unsourced")
+
+    def test_no_cross_tree_binding(self):
+        d = tempfile.mkdtemp(prefix="sm-tree-")
+        try:
+            for root in ("proj", "other"):
+                os.makedirs(os.path.join(d, root, "src"))
+                with open(os.path.join(d, root, "src", "a.py"), "w") as fh:
+                    fh.write("x = 1\ny = 2\n")
+            s = self.sess_with(os.path.join(d, "other", "src", "a.py"), 1, ["x = 1", "y = 2"], os.path.join(d, "proj"))
+            self.assertEqual(check_text("see src/a.py:2", s).checks[0].verdict, "unread_file")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_every_quote_must_match_in_order_nearby(self):
+        lines = ["def f(a, b):", "    return compute(a, b)", "", "", "", "    cleanup(a)"]
+        s = self.sess_with("/w/src/b.py", 1, lines, "/w")
+        v = lambda t: check_text(t, s).checks[0].verdict
+        self.assertEqual(v("`compute(a, b)` at /w/src/b.py:2"), "verified")
+        self.assertEqual(v("`compute(a, b)` and `delete_everything(db)` at /w/src/b.py:2"), "quote_mismatch")
+        self.assertEqual(v("`compute(a, ... def f(` at /w/src/b.py:2"), "quote_mismatch")  # fragments out of order
+        self.assertEqual(v("`cleanup(a)` at /w/src/b.py:4"), "quote_mismatch")
+
+    def test_extraction_hygiene(self):
+        text = "Python 3.12:5, numpy==1.26:2, api.example.com:443, C:\\x\\y.py:3\n```\nsee example/x.py:9\n```\nreal: src/z.py:4"
+        self.assertEqual([c.raw for c in extract(text)], ["src/z.py:4"])
+
+    def test_tokens_use_the_ledger(self):
+        from sourcemark.anchor import TextSource, mark_lines
+        from sourcemark.ledger import Ledger
+        d = tempfile.mkdtemp(prefix="sm-tok-")
+        try:
+            f = os.path.join(d, "n.txt")
+            body = "".join(f"note {i} about the harbor\n" for i in range(1, 11))
+            with open(f, "w") as fh:
+                fh.write(body)
+            with Ledger(os.path.join(d, "l.db")) as led:
+                m = mark_lines(body, 3, 3, TextSource(path=f))
+                led.put_mark(m)
+                v = lambda t: check_text(t, Session(), ledger=led).checks[0].verdict
+                self.assertEqual(v(f"per {m.token}"), "token_ok")
+                self.assertEqual(v("per [sm:abcdefghij]"), "unknown_token")
+            self.assertEqual(check_text("per [sm:abcdefghij]", Session()).checks[0].verdict, "token_unchecked")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_unresolved_fails_enforcement(self):
+        from sourcemark.hooks import FAILING
+        self.assertIn("unresolved", FAILING)
+        self.assertIn("unknown_token", FAILING)
