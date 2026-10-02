@@ -133,13 +133,13 @@ def stop(payload: dict[str, Any], mode: str | None = None, ledger_path: str | No
     }
 
 
-def run_stop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
+def run_stop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout, ledger_path: str | None = None) -> int:
     try:
         payload = json.load(stdin)
     except (json.JSONDecodeError, ValueError):
         return 0
     try:
-        out = stop(payload)
+        out = stop(payload, ledger_path=ledger_path)
     except Exception as e:  # fail open: a citation checker must never wedge an agent
         print(f"sourcemark hook error (ignored): {e}", file=sys.stderr)
         return 0
