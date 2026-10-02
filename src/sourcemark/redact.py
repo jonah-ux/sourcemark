@@ -37,10 +37,22 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("url_credentials", re.compile(r"\b[a-z][a-z0-9+.\-]*://[^/\s:@]+:[^/\s@]{3,}@")),
     ("auth_header", re.compile(r"(?i)\b(?:authorization|proxy-authorization)\s*[:=]\s*[\"']?(?:bearer|basic|token|bot)\s+[A-Za-z0-9._~+/=\-]{8,}")),
     ("bearer_token", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=\-]{20,}")),
-    # Env files and shells: DB_PASSWORD=..., export GITHUB_TOKEN=..., --password=...
+    # Env files and shells: DB_PASSWORD=..., export GITHUB_TOKEN=..., "- POSTGRES_PASSWORD=..." in
+    # compose lists, and inline "PGPASSWORD=... psql" after && or ;.
     ("env_secret", re.compile(
-        rf"(?m)^\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|PWD|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIALS?|AUTH_?TOKEN)[A-Z0-9_]*\s*=\s*{_NOT_NUMBER}[\"']?(?!\$)[^\s\"']{{4,}}"
+        rf"(?m)(?:^\s*(?:-\s*)?[\"']?|[;&|]\s*|\s)(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|PWD|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIALS?|AUTH_?TOKEN)[A-Z0-9_]*\s*=\s*{_NOT_NUMBER}[\"']?(?!\$)[^\s\"']{{4,}}"
     )),
+    # .properties / .ini / my.cnf: "spring.datasource.password=hunter22" (whole-line value, no call or index).
+    ("kv_secret", re.compile(
+        rf"(?im)^\s*[\w.\-]*{_SECRET_NAME}[\w.\-]*\s*[=:]\s*{_NOT_NUMBER}(?![\"'$({{\[<#&*|>])[^\s()\[\]{{}};,]{{4,}}\s*$"
+    )),
+    # Connection strings: "Server=db;User Id=app;Password=hunter22;"
+    ("connstring_secret", re.compile(r"(?i)(?:^|;)\s*(?:password|pwd)\s*=\s*[^;\s]{3,}")),
+    ("basic_auth_cli", re.compile(r"(?:^|\s)(?:-u|--user)\s+[^\s:@]+:[^\s@]{3,}")),
+    ("api_key_header", re.compile(r"(?i)\b(?:x-api-key|api-key|x-auth-token|x-access-token|private-token|x-api-token|apikey)\s*:\s*[A-Za-z0-9._~+/=\-]{6,}")),
+    ("mysql_password_flag", re.compile(r"(?i)\bmysql(?:dump|admin)?\b[^\n]*?\s-p(?!assword)[^\s\-$][^\s]{3,}")),
+    # Secrets in URL query strings: ?api_key=..., &token=..., &sig=...
+    ("url_secret_param", re.compile(r"(?i)[?&](?:api[_-]?key|apikey|key|token|access[_-]?token|auth|sig|signature|secret|password|pwd)=[^&\s#]{6,}")),
     ("cli_secret", re.compile(r"(?i)--(?:password|passwd|token|api-key|secret)(?:=|\s+)(?![-$])[^\s\"']{4,}")),
     # name = "literal" in code / config (quoted value only, so expressions are not flagged).
     ("assigned_secret", re.compile(
