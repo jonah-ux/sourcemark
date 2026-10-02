@@ -8,7 +8,7 @@
     },
     {
       "path": "src/sourcemark/hooks.py",
-      "sha256": "3f26ba656ed8811e59d3331876faafab93e16990c2cf9d43f754b6dfedf60d3b"
+      "sha256": "bf21ce24067b5f351e80fc31ad4bc8f1aeefe77c1f16bab53bfe56cb7b305278"
     },
     {
       "path": "tests/test_ledger_hooks.py",
@@ -20,11 +20,11 @@
   ],
   "why_trace": {
     "verdict": "GENUINE_BUG",
-    "root_cause": "Citations and citation checks had no durable record, so a later reader could not tell what was cited, when it was checked, or whether the record had been altered.",
+    "root_cause": "A live enforce-mode agent run showed the Stop hook reading the transcript before the final reply was flushed, and quote checks attributing one claim's code span to neighbouring citations.",
     "evidence": [
-      "tests/test_ledger_hooks.py rewrites a stored event and verify() reports the exact broken sequence number",
-      "Events are appended inside BEGIN IMMEDIATE transactions so concurrent hook processes keep one chain",
-      "The Stop hook fails open: ledger or parse errors never block the agent"
+      "Live headless run: first Stop check saw 0 citations, the second saw 22; settled re-read added",
+      "Same run: 10 quote_mismatch false flags fell to 0 after nearest-citation attribution and expression-only quote checks (24/24 verified)",
+      "Benchmark 3 iteration 6: 100% detection, 0.43% false-flag rate on injected citations"
     ]
   },
   "documentation": [
@@ -32,5 +32,5 @@
     "src/sourcemark/ledger.py",
     "src/sourcemark/hooks.py"
   ],
-  "source_commit": "9da4e1043bff8eb69a452b49a293209e0a673336"
+  "source_commit": "fec5f9c0067f9ba248cd3c53ad20d0afadf09d61"
 }
