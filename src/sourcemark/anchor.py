@@ -153,8 +153,9 @@ def mark_lines(
     """Cite whole lines ``line_start..line_end`` (1-based, inclusive)."""
     doc = normalize_newlines(doc)
     offsets = line_offsets(doc)
-    if not (1 <= line_start <= line_end <= len(offsets)):
-        raise ValueError(f"lines {line_start}-{line_end} outside 1-{len(offsets)}")
+    n_lines = len(offsets) - (1 if doc.endswith("\n") else 0)  # a trailing newline does not start a line
+    if not (1 <= line_start <= line_end <= n_lines):
+        raise ValueError(f"lines {line_start}-{line_end} outside 1-{n_lines}")
     start = offsets[line_start - 1]
     end = offsets[line_end] - 1 if line_end < len(offsets) else len(doc)
     if end <= start:  # empty line(s): include the newline so the span is non-empty

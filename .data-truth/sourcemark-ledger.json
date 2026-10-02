@@ -12,7 +12,7 @@
     },
     {
       "path": "tests/test_ledger_hooks.py",
-      "sha256": "3626d287fee910dd7e6e8201689db1bebed5a00d61cbe12d6e09dc6602823013"
+      "sha256": "e56bce5ea43e965e76c7d816e0d3c569972dbef5333b3923b906a1f37b07540f"
     }
   ],
   "facts": [
@@ -32,5 +32,5 @@
     "src/sourcemark/ledger.py",
     "src/sourcemark/hooks.py"
   ],
-  "source_commit": "27a1b2f409059bd4467c6ab3350fd5e7940d4dff"
+  "source_commit": "bd813ae169e383907e04829cd5f68fe0f1cf7a02"
 }
