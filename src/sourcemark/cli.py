@@ -192,7 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("hook", help="agent runtime hooks (read the event JSON on stdin)")
     p.add_argument("event", choices=["stop"])
-    p.set_defaults(func=lambda a: run_stop())
+    p.set_defaults(func=lambda a: run_stop(ledger_path=a.ledger))
     return parser
 
 
