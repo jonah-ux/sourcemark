@@ -27,6 +27,7 @@ class Observation:
     at: str | None = None
     line_numbers: list[int] | None = None  # set for sparse observations (grep hits)
     total_lines: int | None = None
+    delegated: bool = False  # seen by a subagent, not by the agent itself
 
     def covered(self) -> set[int]:
         if self.line_numbers is not None:
@@ -50,6 +51,7 @@ class Session:
     urls: set[str] = field(default_factory=set)  # normalized URLs seen in any tool output or user message
     cwds: set[str] = field(default_factory=set)  # every working directory the session used
     text_turns: list[int] = field(default_factory=list)  # turn number of each assistant text, in order
+    delegated_urls: set[str] = field(default_factory=set)  # URLs only a subagent saw
 
     def add(self, obs: Observation | None) -> None:
         if obs is not None and (obs.lines or obs.line_numbers is not None):
@@ -243,11 +245,13 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
 # --- transcript readers ---------------------------------------------------------
 
 
-def read_claude_transcript(path: str) -> tuple[Session, list[tuple[str, str]]]:
+def read_claude_transcript(path: str, subagents: bool = True) -> tuple[Session, list[tuple[str, str]]]:
     """Parse a Claude Code JSONL transcript.
 
     Returns the session observations and the assistant text messages as
-    ``(timestamp, text)`` in order.
+    ``(timestamp, text)`` in order. Subagent transcripts stored next to the
+    session (``<session>/subagents/*.jsonl``) are loaded as *delegated*
+    observations: the orchestrator did not read those lines itself.
     """
     sess = Session()
     texts: list[tuple[str, str]] = []
@@ -297,6 +301,20 @@ def read_claude_transcript(path: str) -> tuple[Session, list[tuple[str, str]]]:
                         sess.urls |= urls_in(tin)
                     for obs in observe_tool(name, tin, tur, c.get("content"), e.get("cwd") or sess.cwd, at):
                         sess.add(obs)
+    if subagents:
+        sub_dir = os.path.join(path[: -len(".jsonl")] if path.endswith(".jsonl") else path, "subagents")
+        if os.path.isdir(sub_dir):
+            for name in sorted(os.listdir(sub_dir)):
+                if not name.endswith(".jsonl"):
+                    continue
+                try:
+                    sub, _ = read_claude_transcript(os.path.join(sub_dir, name), subagents=False)
+                except OSError:
+                    continue
+                for o in sub.observations:
+                    o.delegated = True
+                    sess.observations.append(o)
+                sess.delegated_urls |= sub.urls - sess.urls
     return sess, texts
 
 
