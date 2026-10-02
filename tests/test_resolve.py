@@ -171,6 +171,20 @@ class RedactionTest(unittest.TestCase):
         for c in cases:
             self.assertTrue(find_secrets(c), c)
 
+    def test_remaining_patterns(self):
+        import hashlib
+        cases = {
+            "cli_secret": "mysql --pass" + "word=Hunter2Hunter2 -h db",
+            "yaml_secret": "  pass" + "word: Hunter2Hunter2\n",
+            "npm_token": "npm_" + "a1B2" * 9,
+            "huggingface_token": "hf_" + "a1B2c3" * 6,
+            "sendgrid_key": "SG." + "a1B2c3d4" * 3 + "." + "e5F6g7h8" * 3,
+            "key_material": "Ab1" * 30,
+        }
+        for name, text in cases.items():
+            self.assertIn(name, find_secrets(text), text)
+        self.assertFalse(find_secrets(hashlib.sha256(b"x").hexdigest() * 2))
+
     def test_ordinary_code_is_not_redacted(self):
         for c in ['author = "Jonah"', "max_tokens: 4096", "password_hash = hash(password)", "export API_KEY=$FROM_VAULT"]:
             self.assertFalse(find_secrets(c), c)
