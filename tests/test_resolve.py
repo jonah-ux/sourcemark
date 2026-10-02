@@ -139,6 +139,16 @@ class AnchorPrecisionTest(unittest.TestCase):
         self.write("a/c.py", "import os\nimport sys\n")
         self.assertEqual(resolve(m, roots=[self.dir]).status, "orphaned")
 
+    def test_unique_distinctive_line_moves_to_another_file(self):
+        body = "head\nretry_budget = compute_backoff(attempts, ceiling)\ntail\n"
+        p = self.write("a/src.py", body)
+        from sourcemark.anchor import TextSource
+        m = mark_lines(body, 2, 2, TextSource(path=p))
+        self.write("a/src.py", "head\ntail\n")
+        dest = self.write("b/pasted.md", "notes\nretry_budget = compute_backoff(attempts, ceiling)\nmore\n")
+        r = resolve(m, roots=[self.dir])
+        self.assertEqual((r.status, r.path, r.line_start), ("moved", dest, 2))
+
     def test_unicode_normalization_is_not_an_edit(self):
         import unicodedata
         body = "intro\nRésumé café naïve façade — the cited line\noutro\n"
