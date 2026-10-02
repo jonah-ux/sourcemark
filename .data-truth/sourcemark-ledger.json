@@ -8,11 +8,11 @@
     },
     {
       "path": "src/sourcemark/hooks.py",
-      "sha256": "c86ad4f0dea0e6e2960923c93b0d96395c6de455d39f42025a130da1b306ddc5"
+      "sha256": "7386e28c499eb0a561da0cdfe201e34f6eaee0dc9b44358eb0a64eea5c5d20fd"
     },
     {
       "path": "tests/test_ledger_hooks.py",
-      "sha256": "e56bce5ea43e965e76c7d816e0d3c569972dbef5333b3923b906a1f37b07540f"
+      "sha256": "9cf845206163dcc3a43b66419faba96b837c7741b201416b5e70932f0c3f03c5"
     }
   ],
   "facts": [
@@ -20,11 +20,10 @@
   ],
   "why_trace": {
     "verdict": "GENUINE_BUG",
-    "root_cause": "An independent adversarial review showed verify-ledger missed deleting the last event, deleting all events, editing a stored mark body, and inserting a forged mark; mark prefix lookup treated _ and % as wildcards.",
+    "root_cause": "A second independent adversarial review showed the Stop hook ignored the global --ledger flag (writing to the default home ledger) and that one ambiguous token aborted the whole check through the fail-open path.",
     "evidence": [
-      "tests/test_ledger_hooks.py LedgerTamperTest reproduces each tampering and now fails verification",
-      "A wholesale rewrite is caught only against an anchor kept elsewhere, which the test proves and the docs state",
-      "CLI usage errors exit 2 instead of raising; a malformed transcript line no longer disables enforcement"
+      "tests/test_ledger_hooks.py HookLedgerFlagTest runs python -m sourcemark --ledger X hook stop and asserts nothing is written to the default home",
+      "tests/test_check.py AdversarialRound2CheckTest.test_ambiguous_token_is_unknown_not_a_crash"
     ]
   },
   "documentation": [
@@ -32,5 +31,5 @@
     "src/sourcemark/ledger.py",
     "src/sourcemark/hooks.py"
   ],
-  "source_commit": "bd813ae169e383907e04829cd5f68fe0f1cf7a02"
+  "source_commit": "f63795b14dec57b6a058d2cfb48832a7c08b0605"
 }
