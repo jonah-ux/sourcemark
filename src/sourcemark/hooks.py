@@ -25,7 +25,19 @@ from .observe import read_claude_transcript
 
 MODES = ("off", "shadow", "warn", "enforce")
 # Verdicts that mean "this citation is not backed by the session's evidence".
-FAILING = {"unread_lines", "out_of_range", "unread_file", "nonexistent", "quote_mismatch", "url_unsourced", "partial"}
+FAILING = {
+    "unread_lines", "out_of_range", "unread_file", "nonexistent", "unresolved",
+    "quote_mismatch", "partial", "unknown_token", "token_stale",
+}
+# Reported but not blocking by default: agents often give the user a link to click
+# (a console, a login page) rather than citing a source. SOURCEMARK_STRICT_URLS=1 makes it block.
+WARNING = {"url_unsourced"}
+
+
+def failing() -> set[str]:
+    if os.environ.get("SOURCEMARK_STRICT_URLS", "").lower() in ("1", "true", "yes"):
+        return FAILING | WARNING
+    return FAILING
 
 
 def _last_turn_texts(texts: list[tuple[str, str]], turns: list[int]) -> list[str]:
@@ -61,7 +73,7 @@ def _read_settled(tpath: str, tries: int = 5, wait: float = 0.2):
 
 
 def summarize(rep: Report) -> str:
-    bad = [c for c in rep.checks if c.verdict in FAILING]
+    bad = [c for c in rep.checks if c.verdict in FAILING | WARNING]
     head = f"sourcemark: {rep.total} citation(s), {rep.passing} backed by this session"
     if not bad:
         return head
@@ -81,8 +93,16 @@ def stop(payload: dict[str, Any], mode: str | None = None, ledger_path: str | No
     t0 = time.perf_counter()
     sess, texts, turn_texts = _read_settled(tpath)
     rep = Report()
-    for t in turn_texts:
-        rep.checks.extend(check_text(t, sess).checks)
+    try:
+        led_for_tokens: Any = Ledger(ledger_path)
+    except Exception:
+        led_for_tokens = None
+    try:
+        for t in turn_texts:
+            rep.checks.extend(check_text(t, sess, ledger=led_for_tokens).checks)
+    finally:
+        if led_for_tokens is not None:
+            led_for_tokens.close()
     elapsed = (time.perf_counter() - t0) * 1000
     try:
         with Ledger(ledger_path) as led:
@@ -94,7 +114,7 @@ def stop(payload: dict[str, Any], mode: str | None = None, ledger_path: str | No
             )
     except Exception:  # the ledger must never break the agent
         pass
-    bad = [c for c in rep.checks if c.verdict in FAILING]
+    bad = [c for c in rep.checks if c.verdict in failing()]
     if mode == "shadow" or not rep.checks:
         return None
     if mode == "warn":
@@ -128,4 +148,4 @@ def run_stop(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
     return 0
 
 
-__all__ = ["stop", "run_stop", "summarize", "FAILING", "PASSING", "MODES"]
+__all__ = ["stop", "run_stop", "summarize", "failing", "FAILING", "WARNING", "PASSING", "MODES"]
