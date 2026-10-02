@@ -124,9 +124,19 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
+    anchor = None
+    if args.anchor:
+        with open(args.anchor, encoding="utf-8") as fh:
+            anchor = json.load(fh)
     with Ledger(args.ledger) as led:
-        v = led.verify()
-    _out(args, v, f"ledger {'OK' if v['ok'] else 'BROKEN at seq ' + str(v['broken_at'])} ({v['events']} events)")
+        v = led.verify(anchor)
+        if v["ok"] and args.write_anchor:
+            with open(args.write_anchor, "w", encoding="utf-8") as fh:
+                json.dump(led.anchor(), fh)
+    text = f"ledger {'OK' if v['ok'] else 'TAMPERED'} ({v['events']} events)"
+    if v["problems"]:
+        text += "\n" + "\n".join(f"  - {p}" for p in v["problems"])
+    _out(args, v, text)
     return 0 if v["ok"] else 1
 
 
@@ -174,7 +184,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_check)
 
-    p = sub.add_parser("verify-ledger", help="recompute the ledger hash chain")
+    p = sub.add_parser("verify-ledger", help="recompute the ledger hash chain and cross-check marks")
+    p.add_argument("--anchor", help="JSON anchor saved earlier (detects a wholesale rewrite)")
+    p.add_argument("--write-anchor", help="after a clean verify, write the current anchor here (keep it elsewhere)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_verify)
 

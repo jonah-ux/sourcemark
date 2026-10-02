@@ -4,7 +4,7 @@
   "data_paths": [
     {
       "path": "src/sourcemark/ledger.py",
-      "sha256": "a64c44a8b93fe0011dd71fc9ab346a2917ba5e17850d2f87eb958394b917be5e"
+      "sha256": "66fa7fece7f4fe2a36fa9e317b102585e7068e727feb7e99422cb67c64a2e139"
     },
     {
       "path": "src/sourcemark/hooks.py",
@@ -12,7 +12,7 @@
     },
     {
       "path": "tests/test_ledger_hooks.py",
-      "sha256": "436333438cb1ec23d0cc07dd443f54b87c660280908d8c73198a72286df3c143"
+      "sha256": "3626d287fee910dd7e6e8201689db1bebed5a00d61cbe12d6e09dc6602823013"
     }
   ],
   "facts": [
@@ -20,11 +20,11 @@
   ],
   "why_trace": {
     "verdict": "GENUINE_BUG",
-    "root_cause": "An independent adversarial review showed unsupported citations passing enforcement: unresolved paths and invented [sm:] tokens were not failing verdicts, and the hook never consulted the ledger for tokens.",
+    "root_cause": "An independent adversarial review showed verify-ledger missed deleting the last event, deleting all events, editing a stored mark body, and inserting a forged mark; mark prefix lookup treated _ and % as wildcards.",
     "evidence": [
-      "tests/test_check.py StrictnessTest reproduces each finding",
-      "Three live enforce-mode agent answers still verify 24/24, 19/19, 12/12 with 15 quotes checked",
-      "Transcript benchmark: 100% detection, 0.36% false flags over 188 real citations"
+      "tests/test_ledger_hooks.py LedgerTamperTest reproduces each tampering and now fails verification",
+      "A wholesale rewrite is caught only against an anchor kept elsewhere, which the test proves and the docs state",
+      "CLI usage errors exit 2 instead of raising; a malformed transcript line no longer disables enforcement"
     ]
   },
   "documentation": [
@@ -32,5 +32,5 @@
     "src/sourcemark/ledger.py",
     "src/sourcemark/hooks.py"
   ],
-  "source_commit": "ca9c0397d6cad46282341c21838a15882383b6b0"
+  "source_commit": "27a1b2f409059bd4467c6ab3350fd5e7940d4dff"
 }
