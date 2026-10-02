@@ -1,0 +1,36 @@
+{
+  "version": "data-truth-change/v1",
+  "canonical_project": "jonah-ux/sourcemark",
+  "data_paths": [
+    {
+      "path": "src/sourcemark/ledger.py",
+      "sha256": "a64c44a8b93fe0011dd71fc9ab346a2917ba5e17850d2f87eb958394b917be5e"
+    },
+    {
+      "path": "src/sourcemark/hooks.py",
+      "sha256": "3f26ba656ed8811e59d3331876faafab93e16990c2cf9d43f754b6dfedf60d3b"
+    },
+    {
+      "path": "tests/test_ledger_hooks.py",
+      "sha256": "436333438cb1ec23d0cc07dd443f54b87c660280908d8c73198a72286df3c143"
+    }
+  ],
+  "facts": [
+    "sourcemark.public_cli.source_contract"
+  ],
+  "why_trace": {
+    "verdict": "GENUINE_BUG",
+    "root_cause": "Citations and citation checks had no durable record, so a later reader could not tell what was cited, when it was checked, or whether the record had been altered.",
+    "evidence": [
+      "tests/test_ledger_hooks.py rewrites a stored event and verify() reports the exact broken sequence number",
+      "Events are appended inside BEGIN IMMEDIATE transactions so concurrent hook processes keep one chain",
+      "The Stop hook fails open: ledger or parse errors never block the agent"
+    ]
+  },
+  "documentation": [
+    "README.md",
+    "src/sourcemark/ledger.py",
+    "src/sourcemark/hooks.py"
+  ],
+  "source_commit": "9da4e1043bff8eb69a452b49a293209e0a673336"
+}

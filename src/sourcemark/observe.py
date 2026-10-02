@@ -49,6 +49,7 @@ class Session:
     cwd: str | None = None
     urls: set[str] = field(default_factory=set)  # normalized URLs seen in any tool output or user message
     cwds: set[str] = field(default_factory=set)  # every working directory the session used
+    text_turns: list[int] = field(default_factory=list)  # turn number of each assistant text, in order
 
     def add(self, obs: Observation | None) -> None:
         if obs is not None and (obs.lines or obs.line_numbers is not None):
@@ -246,6 +247,7 @@ def read_claude_transcript(path: str) -> tuple[Session, list[tuple[str, str]]]:
     sess = Session()
     texts: list[tuple[str, str]] = []
     pending: dict[str, tuple[str, dict[str, Any]]] = {}
+    turn = 0
     with open(path, encoding="utf-8") as fh:
         for line in fh:
             try:
@@ -258,6 +260,14 @@ def read_claude_transcript(path: str) -> tuple[Session, list[tuple[str, str]]]:
             msg = e.get("message") or {}
             content = msg.get("content")
             at = e.get("timestamp")
+            if e.get("type") == "user" and not e.get("isMeta"):
+                prompt = isinstance(content, str) or (
+                    isinstance(content, list)
+                    and any(isinstance(c, dict) and c.get("type") == "text" for c in content)
+                    and not any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content)
+                )
+                if prompt:
+                    turn += 1  # a new human prompt starts a new turn
             if e.get("type") == "user" and isinstance(content, str):
                 sess.urls |= urls_in(content)  # a link the user gave is sourced
             if not isinstance(content, list):
@@ -269,6 +279,7 @@ def read_claude_transcript(path: str) -> tuple[Session, list[tuple[str, str]]]:
                     pending[c.get("id", "")] = (c.get("name", ""), c.get("input") or {})
                 elif c.get("type") == "text" and e.get("type") == "assistant":
                     texts.append((at or "", c.get("text", "")))
+                    sess.text_turns.append(turn)
                 elif c.get("type") == "text" and e.get("type") == "user":
                     sess.urls |= urls_in(c.get("text", ""))
                 elif c.get("type") == "tool_result":
