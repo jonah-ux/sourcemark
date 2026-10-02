@@ -233,3 +233,61 @@ class HookLedgerFlagTest(unittest.TestCase):
         subprocess.run([sys.executable, "-m", "sourcemark", "--ledger", db, "hook", "stop"], input=json.dumps({"transcript_path": t}), text=True, env=env, check=True, capture_output=True)
         self.assertTrue(os.path.isfile(db))
         self.assertFalse(os.path.exists(os.path.join(home, "ledger.db")))
+
+
+class LedgerTamperRound2Test(unittest.TestCase):
+    def setUp(self):
+        from sourcemark.anchor import TextSource, mark_lines
+
+        self.d = tempfile.mkdtemp(prefix="sm-led2-")
+        self.addCleanup(shutil.rmtree, self.d, True)
+        self.p = os.path.join(self.d, "l.db")
+        a = "def transfer(amount):\n    require_two_factor(user)\n    send(amount)\n"
+        b = "def noop():\n    return None\n"
+        self.ma = mark_lines(a, 2, 2, TextSource(path="/x/a.py"))
+        self.mb = mark_lines(b, 2, 2, TextSource(path="/x/b.py"))
+        with Ledger(self.p) as led:
+            led.put_mark(self.ma)
+            led.put_mark(self.mb)
+            led.append("check", {"total": 1}, session="s1")
+            self.assertTrue(led.verify()["ok"])
+
+    def sql(self, *stmts):
+        db = sqlite3.connect(self.p)
+        for q, args in stmts:
+            db.execute(q, args)
+        db.commit()
+        db.close()
+
+    def problems(self):
+        with Ledger(self.p) as led:
+            v = led.verify()
+        self.assertFalse(v["ok"])
+        return " ".join(v["problems"])
+
+    def test_deleted_mark_row(self):
+        self.sql(("DELETE FROM marks WHERE id=?", (self.ma.id,)))
+        self.assertIn("deleted", self.problems())
+
+    def test_backdated_event(self):
+        self.sql(("UPDATE events SET at = 0 WHERE kind='check'", ()))
+        self.assertIn("chain broken", self.problems())
+
+    def test_token_hijack(self):
+        self.sql(("UPDATE marks SET token='zzzzzzzzzz' WHERE id=?", (self.ma.id,)),
+                 ("UPDATE marks SET token=? WHERE id=?", (self.ma.id[4:14], self.mb.id)))
+        self.assertIn("token index", self.problems())
+
+    def test_edit_then_revouch(self):
+        import hashlib
+        from sourcemark.ledger import _canon
+
+        body = self.ma.to_dict()
+        body["quote"]["exact"] = "    pass  # 2FA removed"
+        nb = _canon(body)
+        self.sql(("UPDATE marks SET body=? WHERE id=?", (nb, self.ma.id)))
+        with Ledger(self.p) as led:
+            with self.assertRaises(ValueError):
+                led.append("mark", {"id": self.ma.id, "body_sha256": hashlib.sha256(nb.encode()).hexdigest()})
+            led._append("mark", {"id": self.ma.id, "body_sha256": hashlib.sha256(nb.encode()).hexdigest()})
+        self.assertIn("more than one mark event", self.problems())
