@@ -210,6 +210,8 @@ def _quotes_missing(c: Citation, obs: list, out: CitationCheck) -> bool:
             t = o.text_at(n)
             if t is not None:
                 window.append(t)
+    if not window:
+        return False  # the lines were seen but their text was not attributable (Bash-range)
     hay = squash("\n".join(window))
     for q in c.claimed_quotes:
         if not _CODEISH.search(q):

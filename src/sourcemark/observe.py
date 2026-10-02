@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shlex
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator
 
@@ -222,7 +223,7 @@ _HEREDOC_FIRST = re.compile(
 _REDIRECT = re.compile(r"(?:^|[\s;&|])(?:>|>>|tee\s+(?:-a\s+)?)\s*(?P<path>[~/.\w][^\s<>|;&]*)")
 
 
-_CD = re.compile(r"^\s*cd\s+(?P<dir>[^\s;&|]+)\s*(?:&&|;)")
+_CD = re.compile(r"^\s*cd\s+(?P<dir>[^\s;&|]+)(?:\s+2>\s*/dev/null)?[ \t]*(?:&&|;|\n)")
 _PATHISH = re.compile(r"(?<![\w@:/])(?:~?/|\.{1,2}/)?(?:[\w.\-]+/)*[\w.\-]+\.[A-Za-z][A-Za-z0-9]{0,7}(?![\w/])")
 
 
@@ -234,7 +235,10 @@ def expand_assignments(command: str) -> str:
     vals: dict[str, str] = {}
     seen: dict[str, set[str]] = {}
     for m in _ASSIGN.finditer(command):
-        seen.setdefault(m.group("name"), set()).add(m.group("val").strip("'\""))
+        raw = m.group("val")
+        # The shell expands an unquoted leading ~ in an assignment (W=~/x), not a quoted one.
+        val = os.path.expanduser(raw) if raw.startswith("~") else raw.strip("'\"")
+        seen.setdefault(m.group("name"), set()).add(val)
     # A variable set to two values (F=a.py; ...; F=b.py) cannot be substituted by position here.
     vals = {k: next(iter(v)) for k, v in seen.items() if len(v) == 1}
     if not vals:
@@ -346,7 +350,7 @@ def from_shell_writes(command: str, cwd: str | None, at: str | None = None) -> l
             seen.add(p)
             # Content unknown: record a file-level observation with no lines.
             out.append(Observation(p, 0, [""], "Bash-redirect", at, line_numbers=[]))
-    for seg in re.split(r"\s*(?:&&|;|\|\||\n)\s*", command):
+    for seg in _split_unquoted(command, newlines=True):
         if not _COPY.match(seg):
             continue  # cheap prefix test first: shlex on every segment dominates large sessions
         try:
@@ -390,7 +394,7 @@ def gh_refs(command: str, stdout: str = "") -> set[str]:
     if not stdout.strip() or re.search(r"\|\|\s*(?:true|:)\b", command):
         return urls
     listed: set[str] = set()  # repos whose PR/issue LIST ran in this command
-    for seg in re.split(r"\s*(?:&&|;|\|\||\||\n)\s*", command):
+    for seg in _split_unquoted(command, pipes=True, newlines=True):
         # gh must be the command run, possibly inside `X=$(...)`; not text in an echo or string.
         if not re.match(r"\s*(?:[A-Za-z_]\w*=)?(?:\$\(\s*)?(?:(?:timeout|env)\s+\S+\s+)*gh\s", seg):
             continue
@@ -494,7 +498,7 @@ def _grep_evidence(argv: list[str], stdout: str, cwd: str | None, at: str | None
     tool, args = os.path.basename(argv[0]), argv[1:]
     if not _numbered(args):
         return None
-    single = _single_target(args, cwd, tool)
+    single = None if tool == "git-grep" else _single_target(args, cwd, tool)
     if single and other_printers:
         # A single-file grep prints bare "N:text"; another file printed into the same stdout
         # (a second grep, a cat) would have its lines credited to this file.
@@ -537,7 +541,9 @@ def _grep_matcher(args: list[str], tool: str):
         needle = pat.lower() if ci else pat
         return lambda t: needle in (t.lower() if ci else t)
     try:
-        rx = re.compile(pat.replace("\\|", "|"), re.I if ci else 0)
+        with warnings.catch_warnings():  # the agent's own pattern; its style is not our concern
+            warnings.simplefilter("ignore")
+            rx = re.compile(pat.replace("\\|", "|"), re.I if ci else 0)
     except re.error:
         return lambda t: pat in t
     return lambda t: rx.search(t) is not None
@@ -570,23 +576,41 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
     """Recognize simple file-printing commands whose stdout is a known file slice."""
     out: list[Observation] = []
     owner: dict[int, int] = {}  # index in ``out`` -> index of the segment that printed it
-    segments = [x.strip() for x in re.split(r"\s*(?:&&|;|\|\|)\s*", command)]
+    segments = [_unwrap(x) for x in _split_unquoted(command, newlines=True)]
     loud = [x for x in segments if x and not _SILENT.match(x)]
     printers = [x for x in loud if (x.split() or [""])[0].rsplit("/", 1)[-1] in _PRINTERS]
     if any(re.match(r"cd\b", x) for x in segments[1:]):
         # The command changed directory part-way: the same relative name can mean two files.
         return [o for o in _file_level_mentions(segments, cwd, at)]
+    extra: list[Observation] = []  # grep evidence; other segments keep contributing
+    fenced: list[tuple[list[int], list[str]]] | None | bool = False  # echo-marker chunks, lazily
+
+    def grep_for(k: int, gargv: list[str]) -> list[Observation] | None:
+        nonlocal fenced
+        if len(loud) > 1:
+            # Several commands share stdout. If echo markers fence this grep's output off on its
+            # own, read that chunk as if the grep ran alone.
+            if fenced is False:
+                fenced = _echo_chunks(segments, stdout)
+            for segs, chunk in fenced or []:
+                if segs == [k]:
+                    return _grep_evidence(gargv, "\n".join(chunk) + "\n", cwd, at, alone=True)
+        return _grep_evidence(gargv, stdout, cwd, at, alone=len(loud) == 1, other_printers=len(printers) > 1)
+
     for k, seg in enumerate(segments):
-        if "|" in seg:
-            first = seg.split("|", 1)[0].strip()
-            if first.startswith(("rg ", "grep ")):
+        pipe = _unquoted_pipe(seg)
+        if pipe is not None:
+            first = seg[:pipe].strip()
+            if first.startswith(("rg ", "grep ", "git grep ")):
                 try:
                     fargv = _drop_redirects(shlex.split(first))
                 except ValueError:
                     fargv = []
-                grep = _grep_evidence(fargv, stdout, cwd, at, alone=len(loud) == 1, other_printers=len(printers) > 1)
+                if fargv[:2] == ["git", "grep"]:
+                    fargv = ["git-grep", *fargv[2:]]
+                grep = grep_for(k, fargv)
                 if grep is not None:
-                    return grep
+                    extra.extend(grep)
             continue
         try:
             argv = _drop_redirects(shlex.split(seg))
@@ -601,15 +625,21 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
         files = [a for a in args if not a.startswith("-") and not re.fullmatch(r"'?\d*,?\d*p'?", a)]
         if cmd == "cat" and any(a.startswith("-") for a in args):
             continue  # cat -s/-n/-v... changes the lines; do not attribute line numbers
-        if cmd in ("rg", "grep"):
-            grep = _grep_evidence(argv, stdout, cwd, at, alone=len(loud) == 1, other_printers=len(printers) > 1)
+        if cmd == "git" and args[:1] == ["grep"]:
+            # `git grep -n` always prefixes the path, even for one file: never the bare N:text form.
+            grep = grep_for(k, ["git-grep", *args[1:]])
             if grep is not None:
-                return grep
+                extra.extend(grep)
+            continue
+        if cmd in ("rg", "grep"):
+            grep = grep_for(k, argv)
+            if grep is not None:
+                extra.extend(grep)
             continue
         if cmd not in ("cat", "sed", "head", "tail", "nl") or len(files) != 1:
             continue
-        path = files[0] if os.path.isabs(files[0]) or not cwd else os.path.join(cwd, files[0])
-        path = os.path.expanduser(path)
+        path = os.path.expanduser(files[0])  # before the join: `~/x` is absolute, not relative
+        path = path if os.path.isabs(path) or not cwd else os.path.join(cwd, path)
         lines = stdout.split("\n")
         if lines and lines[-1] == "":
             lines = lines[:-1]
@@ -630,10 +660,127 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
     if len(out) > 1 or (out and len(loud) > 1):
         split = _split_by_echo_markers(segments, stdout, {owner[i]: o for i, o in enumerate(out)})
         if split is not None:
-            return split
-        # Several things printed into one stdout: lines cannot be attributed; keep file-level only.
-        return [Observation(o.path, 0, [], "Bash-touch", at, line_numbers=[]) for o in out]
+            return extra + split
+        # Several things printed into one stdout: the TEXT cannot be attributed to lines. File-level
+        # evidence, plus, for an unpiped `sed -n A,Bp f`, the line NUMBERS it printed (text unknown,
+        # so quotes on those lines are not judged from it).
+        res = extra + [Observation(o.path, 0, [], "Bash-touch", at, line_numbers=[]) for o in out]
+        if stdout.strip():
+            for i, o in enumerate(out):
+                seg = segments[owner[i]]
+                rng = re.fullmatch(r"sed\s+-n\s+'?(\d+),(\d+)p'?\s+\S+", seg.strip())
+                if rng and "|" not in seg:
+                    a, b = int(rng.group(1)), int(rng.group(2))
+                    n_file = _line_count(o.path)
+                    if n_file is not None:
+                        b = min(b, n_file)
+                    if a <= b and b - a < 5000:
+                        res.append(Observation(o.path, 0, [None] * (b - a + 1), "Bash-range", at, line_numbers=list(range(a, b + 1))))
+        return res
+    return extra + out
+
+
+# Commands that run another command unchanged: `timeout 60 rg -n ...` is the rg.
+_WRAPPER = re.compile(
+    r"^(?:(?:timeout(?:\s+-[sk]\s*\S+|\s+--\S+)*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+|\s+-\d+)?"
+    r"|command(?=\s+[^-\s])|time|stdbuf(?:\s+-[ioe]\S+)+|env(?:\s+[A-Za-z_]\w*=\S*)+)\s+)+"
+)
+
+
+def _unwrap(seg: str) -> str:
+    return _WRAPPER.sub("", seg, count=1)
+
+
+_HEREDOC_START = re.compile(r"<<(?P<dash>-?)\s*(['\"]?)(?P<word>[A-Za-z_]\w*)\2")
+
+
+def _split_unquoted(command: str, *, pipes: bool = False, newlines: bool = False) -> list[str]:
+    """Split a shell command on ``&&``, ``;``, ``||`` (and ``|``/newlines if asked) outside quotes.
+
+    A grep pattern like ``"a && b"`` is one argument, not two commands. If the quotes never
+    balance (an apostrophe in a heredoc or comment), fall back to splitting on every separator."""
+    command = command.replace("\\\n", " ")  # line continuations
+    seps = ["&&", "||", ";"] + (["|"] if pipes else []) + (["\n"] if newlines else [])
+    out, cur, q, i, n = [], [], None, 0, len(command)
+    heredocs: list[tuple[str, bool]] = []  # (terminator, tabs stripped) opened on this line
+    while i < n:
+        ch = command[i]
+        if not q and ch == "<" and command.startswith("<<", i) and not command.startswith("<<<", i):
+            m = _HEREDOC_START.match(command, i)
+            if m:
+                heredocs.append((m.group("word"), bool(m.group("dash"))))
+        if not q and ch == "\n" and heredocs:
+            # The body is data, not commands: skip to each terminator line in turn.
+            j = i + 1
+            for word, dash in heredocs:
+                while j < n:
+                    end = command.find("\n", j)
+                    line = command[j : end if end != -1 else n]
+                    j = end + 1 if end != -1 else n
+                    if (line.lstrip("\t") if dash else line) == word:
+                        break
+            heredocs = []
+            if newlines:
+                out.append("".join(cur).strip())
+                cur = []
+            i = j
+            continue
+        if q:
+            if ch == "\\" and q == '"' and i + 1 < n:
+                cur.append(command[i : i + 2])
+                i += 2
+                continue
+            if ch == q:
+                q = None
+            cur.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            cur.append(command[i : i + 2])
+            i += 2
+            continue
+        if ch in "'\"":
+            q = ch
+            cur.append(ch)
+            i += 1
+            continue
+        sep = next((x for x in seps if command.startswith(x, i)), None)
+        if sep:
+            out.append("".join(cur).strip())
+            cur = []
+            i += len(sep)
+            continue
+        cur.append(ch)
+        i += 1
+    if q:
+        alt = "|".join(re.escape(x) for x in seps)
+        return [x.strip() for x in re.split(rf"\s*(?:{alt})\s*", command)]
+    out.append("".join(cur).strip())
     return out
+
+
+def _unquoted_pipe(seg: str) -> int | None:
+    """Index of the first `|` outside quotes (a pattern like "a|b" is not a pipeline)."""
+    q = None
+    for i, ch in enumerate(seg):
+        if q:
+            if ch == q:
+                q = None
+        elif ch in "'\"":
+            q = ch
+        elif ch == "|":
+            return i
+    return None
+
+
+def _line_count(path: str) -> int | None:
+    if not _isfile(path):
+        return None
+    try:
+        with open(path, "rb") as fh:
+            return sum(1 for _ in fh)
+    except OSError:
+        return None
 
 
 def _file_level_mentions(segments: list[str], cwd: str | None, at: str | None) -> list[Observation]:
@@ -652,26 +799,35 @@ def _file_level_mentions(segments: list[str], cwd: str | None, at: str | None) -
     return out
 
 
-def _split_by_echo_markers(segments: list[str], stdout: str, printers: dict[int, Observation]) -> list[Observation] | None:
+def _echo_chunks(segments: list[str], stdout: str) -> list[tuple[list[int], list[str]]] | None:
     """``echo "--- a"; sed -n 1,9p a; echo "--- b"; cat b``: each literal echo line in stdout
-    fences off the output of the single command after it. Anything ambiguous returns None:
-    a marker that is blank or too short, or that occurs in stdout more often than it was echoed
-    (a markdown ``---`` inside a printed file would split it in the wrong place)."""
+    fences off the output of the commands after it. Returns (segment indexes, output lines) per
+    fenced group. Anything ambiguous returns None: a marker that is blank or too short, or that
+    occurs in stdout more often than it was echoed (a markdown ``---`` inside a printed file
+    would split it in the wrong place). A bare ``echo`` prints a blank line, not a marker."""
     lines = stdout.split("\n")
     if lines and lines[-1] == "":
         lines = lines[:-1]
     groups: list[list[int]] = [[]]
+    blanks: list[int] = [0]  # bare `echo`s per group: blank lines that are not command output
     markers: list[str] = []
     for k, seg in enumerate(segments):
         if not seg or _SILENT.match(seg):
             continue
-        m = re.fullmatch(r"echo\s+(?:\"([^\"$`\\]*)\"|'([^']*)')", seg)
+        if re.fullmatch(r"echo(?:\s+(?:\"\"|''))?", seg):
+            blanks[-1] += 1
+            continue
+        m = re.fullmatch(r"echo\s+(?:\"([^\"$`\\]*)\"|'([^']*)'|((?!-[A-Za-z]+(?:\s|$))[^\s\"'$`\\;&|<>]+(?:\s+[^\s\"'$`\\;&|<>]+)*))", seg)
         if m:
-            mk = m.group(1) if m.group(1) is not None else m.group(2)
+            if m.group(3) is not None:
+                mk = " ".join(m.group(3).split())  # unquoted: `echo -----`, `echo ... next`
+            else:
+                mk = m.group(1) if m.group(1) is not None else m.group(2)
             if len(mk.strip()) < 3:
                 return None
             markers.append(mk)
             groups.append([])
+            blanks.append(0)
         else:
             groups[-1].append(k)
     if not markers:
@@ -688,14 +844,31 @@ def _split_by_echo_markers(segments: list[str], stdout: str, printers: dict[int,
         bounds.append(i)
         pos = i + 1
     edges = [-1, *bounds, len(lines)]
-    result: list[Observation] = []
+    out = []
     for g, segs in enumerate(groups):
         chunk = lines[edges[g] + 1 : edges[g + 1]]
+        for _ in range(blanks[g]):
+            if chunk and chunk[-1] == "":
+                chunk = chunk[:-1]
+        out.append((segs, chunk))
+    return out
+
+
+def _split_by_echo_markers(segments: list[str], stdout: str, printers: dict[int, Observation]) -> list[Observation] | None:
+    """Attribute each echo-fenced chunk to the single file printer in it (see ``_echo_chunks``)."""
+    chunks = _echo_chunks(segments, stdout)
+    if chunks is None:
+        return None
+    result: list[Observation] = []
+    for segs, chunk in chunks:
         found = [printers[k] for k in segs if k in printers]
         if not found:
             continue
         o = found[0]
         if len(segs) == 1 and len(found) == 1:
+            rng = re.search(r"\b(\d+),(\d+)p\b", segments[segs[0]])
+            if rng and len(chunk) > int(rng.group(2)) - int(rng.group(1)) + 1:
+                return None  # more lines than `sed -n A,Bp` can print: the split is wrong somewhere
             result.append(Observation(o.path, o.line_start, chunk, "Bash", o.at))
         else:
             result.extend(Observation(f.path, 0, [], "Bash-touch", f.at, line_numbers=[]) for f in found)
@@ -897,9 +1070,10 @@ def normalize_url(url: str) -> str:
 
 def urls_in(value: Any) -> set[str]:
     text = value if isinstance(value, str) else json.dumps(value, default=str)
-    from .cite import valid_url
+    from .cite import _elided, valid_url
 
-    return {normalize_url(u) for u in _URL.findall(text) if valid_url(u)}
+    # An elided link ("https://loom.com/share/ad4…") names no page; it is not a source either.
+    return {normalize_url(u) for u in _URL.findall(text) if valid_url(u) and not _elided(u)}
 
 
 _ERROR_TEXT = re.compile(r"^\s*(?:Error\b|<tool_use_error>|Exit code [1-9])")
