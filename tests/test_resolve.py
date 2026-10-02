@@ -147,3 +147,29 @@ class AnchorPrecisionTest(unittest.TestCase):
         m = mark_lines(unicodedata.normalize("NFC", body), 2, 2, TextSource(path=p))
         self.write("u.txt", unicodedata.normalize("NFD", body))
         self.assertIn(resolve(m).status, ("intact", "shifted"))
+
+
+class RedactionTest(unittest.TestCase):
+    def test_formats_that_used_to_leak(self):
+        cases = [
+            "DB_PASS" + "WORD=Sup3rS3cretValue99",
+            '{"pass' + 'word": "hunter2xx"}',
+            "Authorization: Bearer " + "abcdefghijklmnopqrstuvwxyz012345",
+            "glpat-" + "a" * 20,
+            "host.example:5432:app:admin:" + "Pa55word!",
+        ]
+        for c in cases:
+            self.assertTrue(find_secrets(c), c)
+
+    def test_ordinary_code_is_not_redacted(self):
+        for c in ['author = "Jonah"', "max_tokens: 4096", "password_hash = hash(password)", "export API_KEY=$FROM_VAULT"]:
+            self.assertFalse(find_secrets(c), c)
+
+    def test_secret_cut_at_context_edge_is_not_stored(self):
+        from sourcemark.anchor import TextSource, mark_text
+        tok = "ghp_" + "A" * 36
+        doc = "x = 1\nprint('hello world, this is the cited line')\ntoken = '" + tok + "'\n"
+        s = doc.index("print")
+        e = doc.index("\n", s)
+        m = mark_text(doc, s, e, TextSource(path="/x"), context=20)
+        self.assertIsNone(m.quote["exact"])  # the 20-char suffix would hold a fragment of the token
