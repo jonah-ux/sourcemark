@@ -97,16 +97,29 @@ def locate(
     if not exact.strip():
         return None
 
-    # 1. Recorded position still holds the same text.
-    if hint_start is not None and doc[hint_start : hint_start + len(exact)] == exact:
+    whole = _whole_lines(prefix, suffix)
+
+    # 1. Recorded position still holds the same text, and (for whole-line quotes) the line
+    # still ends where the quote ends: "total = a + b" -> "total = a + b - discount" is an edit.
+    if (
+        hint_start is not None
+        and doc[hint_start : hint_start + len(exact)] == exact
+        and (not whole or _on_line_bounds(doc, hint_start, hint_start + len(exact)))
+    ):
         ctx = _context_score(doc, hint_start, hint_start + len(exact), prefix, suffix)
-        # A decoy copy can land on the old offset; only trust it if the context agrees
-        # or if it is the only copy.
-        if ctx >= 0.5 or doc.count(exact) == 1:
+        if doc.count(exact) == 1:
+            return Match(hint_start, hint_start + len(exact), 1.0, "position", ctx)
+        # Several copies: a decoy can land on the old offset (two same-length functions
+        # swapped). Keep the position only if no other copy's surroundings agree better.
+        others = [
+            _context_score(doc, o, o + len(exact), prefix, suffix)
+            for o in _all_occurrences(doc, exact)
+            if o != hint_start and (not whole or _on_line_bounds(doc, o, o + len(exact)))
+        ]
+        if ctx >= 0.5 and all(ctx >= x for x in others):
             return Match(hint_start, hint_start + len(exact), 1.0, "position", ctx)
 
     # 2. Exact text elsewhere; choose by context, then by distance to the hint.
-    whole = _whole_lines(prefix, suffix)
     occ = [o for o in _all_occurrences(doc, exact) if not whole or _on_line_bounds(doc, o, o + len(exact))]
     if occ:
         def rank(pos: int) -> tuple[float, float]:
@@ -142,6 +155,20 @@ def locate(
     m = _fuzzy(doc, exact, prefix, suffix, hint_start, k, min_similarity)
     if m is None:
         return None
+    if whole:
+        # A whole-line citation matches whole lines: widen the hit and score the full lines,
+        # or an appended-to line would match its own old prefix at similarity 1.0.
+        s_ = doc.rfind("\n", 0, m.start) + 1
+        e_ = doc.find("\n", m.end)
+        e_ = len(doc) if e_ < 0 else e_
+        if (s_, e_) != (m.start, m.end):
+            sim = SequenceMatcher(None, doc[s_:e_], exact, autojunk=False).ratio()
+            contained = m.similarity >= 0.999  # the whole quote is still there, plus additions
+            if sim < min_similarity and not (contained and _context_score(doc, s_, e_, prefix, suffix, worst=True) >= min_context):
+                return None
+            m = Match(s_, e_, min(sim, 0.99), m.method, _context_score(doc, s_, e_, prefix, suffix))
+            if contained:
+                return m  # extended in place, neighbours agree: an edit of this line
     if _is_a_neighbour(doc, m, exact, prefix, suffix):
         return None
     if m.similarity >= strong_similarity:
