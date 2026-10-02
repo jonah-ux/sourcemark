@@ -29,7 +29,8 @@ Print a stored mark (quote text, or `[redacted]` / `[fingerprint only]`).
 
 ## `sourcemark check TRANSCRIPT [--all] [--now] [--text FILE]`
 
-Check citations against what a Claude Code session read and wrote. By default checks the last
+Check citations against what a Claude Code session or a Codex rollout read and wrote (the format
+is detected; see the README's Codex section for how Codex cells are read). By default checks the last
 turn (all assistant text since the latest human prompt). `--all` checks every assistant message;
 `--now` also reports whether cited lines changed since they were read; `--text` checks the text
 in FILE against the session instead of the transcript's own reply. Exit 1 when any citation is

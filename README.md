@@ -68,18 +68,36 @@ One hook is enough: the runtime passes the transcript path, which already record
 
 `SOURCEMARK_MODE`: `shadow` (default, record only) · `warn` (one-line summary) · `enforce` (send unsupported citations back to the agent to fix; never loops) · `off`. See [docs/hooks.md](docs/hooks.md).
 
+## Codex
+
+`sourcemark check` reads Codex rollouts too (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`); the format is detected automatically.
+
+```bash
+sourcemark check ~/.codex/sessions/2026/10/02/rollout-…jsonl --json
+```
+
+Codex runs its tools from small JavaScript cells, so the printed output is whatever the cell printed. sourcemark reads it conservatively:
+
+- A cell that runs one literal `exec_command` and prints its output unchanged is read like a shell command.
+- In cells that run several commands, only lines that name their own source count: `path:N:text` hits of a multi-file grep in the cell. So do `nl -ba` / `cat -n` lines under a label that appears exactly once.
+- When Codex cut an output (`…N tokens truncated…`), only lines that carry their own line numbers are kept.
+- A failed command and a computed command (`cmd: base + x`) give file-level evidence only.
+- Links in tool output are sourced, minus links the cell itself typed. Links reported by subagents are `delegated`.
+
 ## How it works
 
 A citation stores several independent ways to find the text again — the exact quote with 32 characters of context on each side, its position, fingerprints of the quote and the document, and the git repository, commit and path. Resolving tries the cheapest trustworthy evidence first (the original position, then git renames, then a search of the configured roots) and only accepts a fuzzy match when it is very similar or when **both** sides of its surrounding context agree. Secret-shaped text is never stored, only its fingerprint. Details in [docs/how-it-works.md](docs/how-it-works.md).
 
 ## Measured, not assumed
 
-Evaluated against real-world source files and real agent sessions (synthetic fixtures ship in `tests/`):
+Evaluated against real source files, real git history and real agent sessions. Synthetic fixtures ship in `tests/`.
 
-- **Anchors**: ~1,550 mutation cases per seed (insertions, deletions, in-place edits, reindents, git renames, untracked moves, cut/paste, decoy duplicates) on 30 real-world files: **96.7%** (seed 1) and **96.6%** (held-out seed 2) correct on status *and* line *and* file, median **25 ms** per resolve. Generic one-liners that leave their file are reported `orphaned` on purpose rather than guessed.
-- **Citation checks**: 120 real agent sessions, three seeds, with injected known-good and known-bad citations: **100%** of bad citations caught and **0** good ones flagged on every seed; median **3 ms** per session, p95 65–271 ms.
-- **Database values**: 40 citations across 4 live production tables, re-resolved against an independent raw read: **100%** agreement.
-- **Adversarial review**: three independent reviewers attacked the checker, the resolver, redaction and the ledger. Every reproduced finding (false passes first) is now a regression test.
+- **Anchors through real git history:** 4,691 marks replayed through real commits of four repositories (edits, insertions, renames, deletions), checked against a line alignment of the two versions. **99.5%** correct on status and line; 100% of lines that did not change are found. Median **0.6 ms** per resolve.
+- **Anchors under synthetic mutation:** about 1,550 cases per seed on 30 real files (insertions, deletions, in-place edits, reindents, git renames, untracked moves, cut/paste, decoy duplicates). **97.3%** (seed 1) and **97.4%** (held-out seed 2).
+- **Citation checks on Claude Code sessions:** about 2,900 sessions, with near-miss citations injected next to real evidence (a neighbouring unread line, a range running one line past what was read, a changed word in a quote, an unread file with the same name, a mutated URL). **0.00%** of good citations flagged and **99.9%** of the bad ones caught.
+- **Citation checks on Codex rollouts:** about 3,000 rollouts, 47,000 real citations and 8,300 injected near-misses. **0.00%** of good citations flagged, every near-miss kind caught, median **26 ms** per session.
+- **Database values:** 40 citations across 4 live production tables, re-resolved against an independent raw read: **100%** agreement.
+- **Adversarial review:** three independent reviewers attacked the checker, the resolver, redaction and the ledger. Every reproduced finding is now a regression test, as is every failure found by the benchmarks.
 
 ## Agent usage
 
