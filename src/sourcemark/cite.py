@@ -17,12 +17,25 @@ import re
 from dataclasses import dataclass, field
 
 _EXT = r"[A-Za-z][A-Za-z0-9]{0,7}"  # an extension starts with a letter: "3.12" or "1.26" are versions
-_PATH = rf"(?:~?/|\.{{1,2}}/)?(?:[\w.@+\-]+/)*[\w.@+\-]+\.{_EXT}"
+# Directory names may carry framework route syntax: app/(admin)/users/[id]/page.tsx
+_SEG = r"(?:[\w.@+\-]|\[[\w.\-]+\]|\([\w.\-]+\))+"
+_PATH = rf"(?:~?/|\.{{1,2}}/)?(?:{_SEG}/)*[\w.@+\-]+\.{_EXT}"
 _LINES = r"(?P<l1>\d{1,6})(?:\s*[-–]\s*L?(?P<l2>\d{1,6}))?"
 
 _MD_LINK = re.compile(rf"\[(?P<label>[^\]\n]{{0,200}})\]\((?P<path>{_PATH})(?:#L{_LINES})?\)")
 _HASH_L = re.compile(rf"(?<![\w/.\-])(?P<path>{_PATH})#L{_LINES}")
 _COLON = re.compile(rf"(?<![\w/.\-])(?P<path>{_PATH}):{_LINES}(?![\d])")
+# Inside backticks a path may contain spaces ("Application Support"); outside it cannot be told
+# apart from the prose around it.
+_TICK = re.compile(rf"`(?P<path>(?:~?/|\.{{1,2}}/)?(?:[^`\n/:]+/)+[^`\n/:]*\.{_EXT}):{_LINES}`")
+def valid_url(url: str) -> bool:
+    """A real host, not a template: ``https://<node>``, ``https://{host}``, ``https://$``."""
+    m = re.match(r"https?://([^/?#]*)", url)
+    host = m.group(1).rsplit("@", 1)[-1] if m else ""
+    # Flat character classes only: nested quantifiers here backtrack exponentially on long junk.
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.\-]*(?::\d{1,5})?|\[[0-9A-Fa-f:.]+\](?::\d{1,5})?", host))
+
+
 _TOKEN = re.compile(r"\[sm:(?P<tok>[a-z2-7]{6,26})\]")
 _MD_URL = re.compile(r"\[(?P<label>[^\]\n]{0,200})\]\((?P<url>https?://[^)\s]+)\)")
 _BARE_URL = re.compile(r"(?<![\w])https?://[^\s)\]>`\"']+")
@@ -88,13 +101,19 @@ def extract(
                 if free(m.start(), m.end()):
                     u = m.group("url") if rx is _MD_URL else m.group(0).rstrip(".,;:!?*_")
                     end = m.end() if rx is _MD_URL else m.start() + len(u)
-                    found.append(Citation(text[m.start() : end], m.start(), end, url=u, form="url"))
                     taken.append((m.start(), end))
+                    if "\u2026" in u or "..." in u:
+                        continue  # an elided link ("https://github.com/…") names no page
+                    if not valid_url(u):
+                        continue  # a placeholder ("https://<node>:8080") names no page
+                    found.append(Citation(text[m.start() : end], m.start(), end, url=u, form="url"))
 
-    for rx, form in ((_MD_LINK, "markdown"), (_HASH_L, "hash"), (_COLON, "colon")):
+    for rx, form in ((_TICK, "tick"), (_MD_LINK, "markdown"), (_HASH_L, "hash"), (_COLON, "colon")):
         for m in rx.finditer(text):
             if not free(m.start(), m.end()):
                 continue
+            if form == "tick" and " " not in m.group("path"):
+                continue  # no space: the colon form reads it the same way
             ls, le = _lines(m)
             if form == "colon" and ls is None:
                 continue

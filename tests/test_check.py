@@ -6,7 +6,7 @@ import unittest
 
 from sourcemark.check import check_text
 from sourcemark.cite import extract
-from sourcemark.observe import Session, from_shell, from_shell_writes, normalize_url, read_claude_transcript
+from sourcemark.observe import Observation, Session, from_shell, from_shell_writes, normalize_url, read_claude_transcript
 
 LINES = [f"def handler_{i}(event):  # step {i} of the pipeline" for i in range(1, 41)]
 
@@ -325,6 +325,117 @@ class StrictnessTest(unittest.TestCase):
         got = [c.url for c in extract("(https://fabricated.example/x) and <https://other.example/y>")]
         self.assertEqual(got, ["https://fabricated.example/x", "https://other.example/y"])
 
+    def test_backticked_path_may_contain_spaces(self):
+        c = extract("see `/Users/x/Library/Application Support/a/b.md:45-47` now")
+        self.assertEqual([(x.path, x.line_start, x.line_end) for x in c], [("/Users/x/Library/Application Support/a/b.md", 45, 47)])
+
+    def test_placeholder_url_is_not_a_citation(self):
+        self.assertEqual(extract("open https://<node>:8080/ui or https://{host}/x"), [])
+        self.assertEqual([c.url for c in extract("open http://10.0.0.5:8080/ui")], ["http://10.0.0.5:8080/ui"])
+
+    def _transcript(self, entries):
+        d = tempfile.mkdtemp(prefix="sm-tx-")
+        self.addCleanup(shutil.rmtree, d, True)
+        t = os.path.join(d, "s.jsonl")
+        with open(t, "w") as fh:
+            fh.write("".join(json.dumps(e) + "\n" for e in entries))
+        return read_claude_transcript(t)[0]
+
+    def _bash(self, cmd, stdout, is_error=False):
+        return [
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": cmd}}]}},
+            {"type": "user", "toolUseResult": {"stdout": stdout}, "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": stdout, "is_error": is_error}]}},
+        ]
+
+    def test_gh_view_with_repo_sources_the_pr_url(self):
+        s = self._transcript(self._bash("gh pr view 42 --repo o/r --json state", '{"state":"MERGED"}'))
+        self.assertEqual(check_text("[#42](https://github.com/o/r/pull/42)", s).checks[0].verdict, "url_verified")
+        self.assertEqual(check_text("[#43](https://github.com/o/r/pull/43)", s).checks[0].verdict, "url_unsourced")
+
+    def test_url_in_a_failed_result_is_not_sourced(self):
+        s = self._transcript(self._bash("curl -f https://example.com/doc", "Exit code 22\ncurl: (22) https://example.com/doc 404", True))
+        self.assertEqual(check_text("per https://example.com/doc", s).checks[0].verdict, "url_unsourced")
+
+    def test_copy_destination_is_file_level_evidence(self):
+        d = tempfile.mkdtemp(prefix="sm-cp-")
+        self.addCleanup(shutil.rmtree, d, True)
+        for n in ("a.json", "b.json"):
+            with open(os.path.join(d, n), "w") as fh:
+                fh.write("{}\n")
+        s = self._transcript(self._bash(f"cp /tmp/src/{{a.json,b.json}} {d}/", ""))
+        self.assertEqual(check_text(f"[b]({d}/b.json)", s).checks[0].verdict, "file_only")
+
+    def test_route_segments_in_paths(self):
+        c = extract("see /w/app/(admin)/applicants/[id]/Thread.tsx:505 now")
+        self.assertEqual([(x.path, x.line_start) for x in c], [("/w/app/(admin)/applicants/[id]/Thread.tsx", 505)])
+
+    def test_line_seen_then_file_shrank_is_still_verified(self):
+        s = self.sess_with("/w/a.py", 170, [f"l{i}" for i in range(170, 190)], "/w")
+        s.add(Observation(path="/w/a.py", line_start=1, lines=["x"] * 50, tool="Read", total_lines=50))
+        self.assertEqual(check_text("see /w/a.py:180", s).checks[0].verdict, "verified")
+        self.assertEqual(check_text("see /w/a.py:400", s).checks[0].verdict, "out_of_range")
+
+    def test_url_validation_is_linear_on_junk_hosts(self):
+        import time
+        from sourcemark.cite import valid_url
+        t = time.perf_counter()
+        self.assertFalse(valid_url("https://" + "a-" * 5000 + "!"))
+        self.assertLess(time.perf_counter() - t, 0.5)
+
+    def test_elided_url_is_not_a_citation(self):
+        self.assertEqual(extract("pushed to https://github.com/\u2026 and https://example.com/a/.../b"), [])
+
+    def test_pr_link_entry_sources_its_url(self):
+        d = tempfile.mkdtemp(prefix="sm-pr-")
+        try:
+            t = os.path.join(d, "s.jsonl")
+            with open(t, "w") as fh:
+                fh.write(json.dumps({"type": "pr-link", "prNumber": 7, "prUrl": "https://github.com/o/r/pull/7"}) + "\n")
+            s, _ = read_claude_transcript(t)
+            self.assertEqual(check_text("opened [PR 7](https://github.com/o/r/pull/7)", s).checks[0].verdict, "url_verified")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_absolute_path_printed_by_a_command_is_file_level_evidence(self):
+        from sourcemark.observe import observe_tool
+        d = tempfile.mkdtemp(prefix="sm-out-")
+        try:
+            f = os.path.join(d, "out.sql")
+            with open(f, "w") as fh:
+                fh.write("select 1;\n")
+            s = Session(cwd="/elsewhere")
+            for o in observe_tool("Bash", {"command": 'cp x "$OUT/" && shasum "$OUT/out.sql"'}, {"stdout": f"abc123  {f}\n"}, "", "/elsewhere", None):
+                s.add(o)
+            self.assertEqual(check_text(f"wrote [the file]({f})", s).checks[0].verdict, "file_only")
+            self.assertEqual(check_text(f"see {f}:1", s).checks[0].verdict, "unread_lines")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_variable_assigned_in_the_command_is_expanded(self):
+        from sourcemark.observe import expand_assignments, observe_tool
+        self.assertEqual(expand_assignments('W=/r/x; sed -n 5,7p $W/a.ts ${W}/b.ts $OTHER/c'), "W=/r/x; sed -n 5,7p /r/x/a.ts /r/x/b.ts $OTHER/c")
+        obs = list(observe_tool("Bash", {"command": "W=/r/x; sed -n 5,7p $W/a.ts"}, {"stdout": "e\nf\ng\n"}, "", "/w", None))
+        s = Session(cwd="/w")
+        for o in obs:
+            s.add(o)
+        self.assertEqual(check_text("see a.ts:6", s).checks[0].verdict, "verified")
+
+    def test_echo_markers_split_one_stdout_between_reads(self):
+        out = from_shell('echo "--- a"; sed -n 5,6p /r/a.ts; echo "--- b"; sed -n 10,11p /r/b.ts', "--- a\nA5\nA6\n--- b\nB10\nB11\n", "/w")
+        got = sorted((o.path, o.line_start, tuple(o.lines)) for o in out)
+        self.assertEqual(got, [("/r/a.ts", 5, ("A5", "A6")), ("/r/b.ts", 10, ("B10", "B11"))])
+        # A command between a marker and the read pollutes the chunk: file-level only.
+        out = from_shell('echo "--- a"; git status; sed -n 5,6p /r/a.ts', "--- a\nM x\nA5\nA6\n", "/w")
+        self.assertEqual([(o.path, o.line_start) for o in out], [("/r/a.ts", 0)])
+        # A marker that never appears in stdout: no attribution.
+        out = from_shell('echo "--- a"; sed -n 5,6p /r/a.ts; sed -n 1,2p /r/b.ts', "A5\nA6\nB1\nB2\n", "/w")
+        self.assertTrue(all(o.line_start == 0 for o in out))
+
+    def test_unknown_cd_target_yields_no_relative_evidence(self):
+        from sourcemark.observe import observe_tool
+        obs = list(observe_tool("Bash", {"command": 'cd "$W" && sed -n 1,3p src/a.py'}, {"stdout": "a\nb\nc\n"}, "", "/w", None))
+        self.assertEqual([o for o in obs if not os.path.isabs(o.path) or "$W" in o.path], [])
+
     def test_private_document_is_not_an_endpoint(self):
         s = Session()
         self.assertEqual(check_text("see https://reports.internal/q3/fabricated.pdf", s).checks[0].verdict, "url_unsourced")
@@ -338,6 +449,42 @@ class StrictnessTest(unittest.TestCase):
                     fh.write("x = 1\ny = 2\n")
             s = self.sess_with(os.path.join(d, "other", "src", "a.py"), 1, ["x = 1", "y = 2"], os.path.join(d, "proj"))
             self.assertEqual(check_text("see src/a.py:2", s).checks[0].verdict, "unread_file")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_visited_directory_does_not_block_the_read_copy(self):
+        d = tempfile.mkdtemp(prefix="sm-tree-")
+        try:
+            for root in ("home", "mirror", "read"):
+                os.makedirs(os.path.join(d, root))
+            for root in ("mirror", "read"):
+                with open(os.path.join(d, root, "notes.md"), "w") as fh:
+                    fh.write("a\nb\n")
+            read = os.path.join(d, "read", "notes.md")
+            s = self.sess_with(read, 1, ["a", "b"], os.path.join(d, "home"))
+            s.cwds.add(os.path.join(d, "mirror"))  # passed through, never read there
+            s.last_cwd = os.path.join(d, "home")
+            c = check_text("see notes.md:2", s).checks[0]
+            self.assertEqual((c.verdict, c.resolved_path), ("verified", read))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_two_read_copies_prefer_the_one_covering_the_lines(self):
+        d = tempfile.mkdtemp(prefix="sm-tree-")
+        try:
+            for root in ("start", "end"):
+                os.makedirs(os.path.join(d, root))
+                with open(os.path.join(d, root, "AGENTS.md"), "w") as fh:
+                    fh.write("".join(f"line {i}\n" for i in range(1, 101)))
+            start, end = (os.path.join(d, r, "AGENTS.md") for r in ("start", "end"))
+            s = self.sess_with(start, 1, ["line 1", "line 2"], os.path.join(d, "start"))
+            s.add(Observation(path=end, line_start=80, lines=[f"line {i}" for i in range(80, 96)], tool="Read"))
+            s.cwds.add(os.path.join(d, "end"))
+            s.last_cwd = os.path.join(d, "end")
+            c = check_text("see AGENTS.md:88", s).checks[0]
+            self.assertEqual((c.verdict, c.resolved_path), ("verified", end))
+            c = check_text("see AGENTS.md:2", s).checks[0]
+            self.assertEqual((c.verdict, c.resolved_path), ("verified", start))
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
