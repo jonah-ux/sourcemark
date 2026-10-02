@@ -353,3 +353,45 @@ class RedactionRound2Test(unittest.TestCase):
         blob = " ".join(r[0] for r in rows)
         self.assertNotIn("abcdefghijklmnop", blob)
         self.assertNotIn(self.PW, blob)
+
+
+class AdversarialRound3ResolveTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="sm-res3-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def write(self, name, text):
+        p = os.path.join(self.dir, name)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as fh:
+            fh.write(text)
+        return p
+
+    def mark(self, p, a, b=None):
+        from sourcemark.anchor import TextSource
+        with open(p) as fh:
+            return mark_lines(fh.read(), a, b or a, TextSource(path=p))
+
+    def test_appended_line_is_edited_not_intact(self):
+        p = self.write("p.py", "def f(a, b, c):\n    total = a + b\n    return total\n")
+        m = self.mark(p, 2)
+        self.write("p.py", "def f(a, b, c):\n    total = a + b - discount(c)\n    return total\n")
+        self.assertEqual(resolve(m, search=False).status, "edited")
+
+    def test_in_place_edit_is_not_moved_to_an_old_copy(self):
+        line = "    amount = round(subtotal * (1 + tax_rate) - discount_total, 2)"
+        p = self.write("proj/src/billing.py", f"def charge(order):\n    subtotal = order.sum()\n    tax_rate = rate()\n{line}\n    return amount\n")
+        self.write("proj/legacy/old_billing.py", f"# legacy\ndef old_charge(x, y, z):\n{line}\n    log(x)\n")
+        m = self.mark(p, 4)
+        self.write("proj/src/billing.py", f"def charge(order):\n    subtotal = order.sum()\n    tax_rate = rate()\n{line.replace(', 2)', ', 4)')}\n    return amount\n")
+        r = resolve(m, roots=[os.path.join(self.dir, "proj")])
+        self.assertEqual((r.status, os.path.basename(r.path)), ("edited", "billing.py"))
+
+    def test_swapped_duplicates_follow_the_context(self):
+        get_user = "def get_user(uid):\n    if uid is None:\n        return None\n    return db.users[uid]\n"
+        get_item = "def get_item(iid):\n    if iid is None:\n        return None\n    return db.items[iid]\n"
+        p = self.write("svc.py", get_user + "\n\n" + get_item)
+        m = self.mark(p, 3)
+        self.write("svc.py", get_item + "\n\n" + get_user)
+        r = resolve(m, search=False)
+        self.assertEqual((r.status, r.line_start), ("shifted", 9))

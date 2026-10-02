@@ -42,6 +42,7 @@ _COMMENT = re.compile(r"^\s*(?:#|//|/\*|\*|--|<!--|;|%)")
 OTHER_FILE_DISTINCTIVE = 48
 MAX_SEARCH_FILES = 50
 FUZZY_SEARCH_FILES = 5
+IN_PLACE_CONTEXT = 0.8
 
 
 @dataclass
@@ -198,7 +199,7 @@ def resolve(
             if repo_root.startswith(old):
                 repo_root = new + repo_root[len(old) :]
 
-    def attempt(path: str, allow_fuzzy: bool = True, *, searched: bool = False, unique: bool = False) -> bool:
+    def attempt(path: str, allow_fuzzy: bool = True, *, searched: bool = False, unique: bool = False, strict: bool = False) -> bool:
         doc = _read(path)
         res.candidates_checked += 1
         if doc is None:
@@ -222,7 +223,9 @@ def resolve(
             # the quote is distinctive, the only copy under the roots, or its surroundings
             # moved with it. Boilerplate appears in many files.
             boiler = _boilerplate(exact)
-            distinctive = not boiler and (
+            # strict: the original file still holds an edited version in place, so a copy
+            # elsewhere must ALSO have moved with its surroundings; length alone is not enough.
+            distinctive = not boiler and not strict and (
                 len(exact.strip()) >= OTHER_FILE_DISTINCTIVE
                 or exact.count("\n") >= 2
                 or (unique and len(exact.strip()) >= DISTINCTIVE_CHARS)
@@ -241,13 +244,13 @@ def resolve(
         res.similarity, res.context_score, res.method = m.similarity, m.context_score, m.method
         return True
 
-    def pick_best(cands: list[str], allow_fuzzy: bool, unique: bool) -> bool:
+    def pick_best(cands: list[str], allow_fuzzy: bool, unique: bool, strict: bool = False) -> bool:
         """Try every candidate and keep the one whose surroundings agree most, not the first
         hit: an identical decoy elsewhere must not win over the real moved file."""
         nonlocal res
         best_r: Resolution | None = None
         for c in cands:
-            if attempt(c, allow_fuzzy=allow_fuzzy, searched=True, unique=unique):
+            if attempt(c, allow_fuzzy=allow_fuzzy, searched=True, unique=unique, strict=strict):
                 if best_r is None or (res.similarity, res.context_score) > (best_r.similarity, best_r.context_score):
                     best_r = Resolution(**res.to_dict())
         if best_r is None:
@@ -286,7 +289,16 @@ def resolve(
     if best is not None and exact is not None and search:
         excl = {os.path.abspath(p) for p in seen}
         found = search_roots(roots, exact, excl)
-        if pick_best(found, allow_fuzzy=False, unique=len(found) == 1):
+        # Strict only when the original's fuzzy hit looks like an in-place edit (its own
+        # surroundings agree); a look-alike elsewhere in the original must not block a real move.
+        orig_doc = _read(best.path) if best.path else None
+        in_place = (
+            orig_doc is not None
+            and abs((best.line_start or 0) - (mark.position.get("line_start") or 0)) <= 1
+            and _ctx_worst(orig_doc, Match(best.start, best.end, best.similarity, best.method, best.context_score), mark)
+            >= IN_PLACE_CONTEXT
+        )
+        if pick_best(found, allow_fuzzy=False, unique=len(found) == 1, strict=in_place):
             res.notes.append("exact copy elsewhere preferred over fuzzy match in original")
             return done()
     if best is not None:
