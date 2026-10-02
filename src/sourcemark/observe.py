@@ -10,6 +10,7 @@ even if the file changes later.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -50,6 +51,7 @@ class Session:
     cwd: str | None = None
     urls: set[str] = field(default_factory=set)  # normalized URLs seen in any tool output or user message
     cwds: set[str] = field(default_factory=set)  # every working directory the session used
+    last_cwd: str | None = None  # where the session ended up (where its final answer was written)
     text_turns: list[int] = field(default_factory=list)  # turn number of each assistant text, in order
     delegated_urls: set[str] = field(default_factory=set)  # URLs only a subagent saw
 
@@ -213,12 +215,31 @@ _CD = re.compile(r"^\s*cd\s+(?P<dir>[^\s;&|]+)\s*(?:&&|;)")
 _PATHISH = re.compile(r"(?<![\w@:/])(?:~?/|\.{1,2}/)?(?:[\w.\-]+/)*[\w.\-]+\.[A-Za-z][A-Za-z0-9]{0,7}(?![\w/])")
 
 
+_ASSIGN = re.compile(r"(?:^|[;&|\n(]\s*)(?:export\s+)?(?P<name>[A-Za-z_]\w*)=(?P<val>\"[^\"$`]*\"|'[^']*'|[^\s;&|$`\"']+)(?=[\s;&|)]|$)")
+
+
+def expand_assignments(command: str) -> str:
+    """Substitute ``$NAME`` / ``${NAME}`` for plain ``NAME=value`` assignments made in the command."""
+    vals: dict[str, str] = {}
+    for m in _ASSIGN.finditer(command):
+        vals[m.group("name")] = m.group("val").strip("'\"")
+    if not vals:
+        return command
+    return re.sub(
+        r"\$(?:\{(\w+)\}|(\w+))",
+        lambda m: vals.get(m.group(1) or m.group(2), m.group(0)),
+        command,
+    )
+
+
 def effective_cwd(command: str, cwd: str | None) -> str | None:
     """Follow a leading ``cd DIR &&`` so relative paths in the command resolve correctly."""
     m = _CD.match(command)
     if not m:
         return cwd
     d = os.path.expanduser(m.group("dir").strip("'\""))
+    if re.search(r"[$`]", d):
+        return None  # `cd "$W"`: the agent's shell variable, unknown here
     return os.path.normpath(d if os.path.isabs(d) or not cwd else os.path.join(cwd, d))
 
 
@@ -232,6 +253,28 @@ def from_shell_touches(command: str, cwd: str | None, exclude: set[str], at: str
             continue
         exclude.add(p)
         out.append(Observation(p, 0, [], "Bash-touch", at, line_numbers=[]))
+    return out
+
+
+@functools.lru_cache(maxsize=65536)
+def _isfile(p: str) -> bool:
+    return os.path.isfile(p)
+
+
+_ABS_IN_OUTPUT = re.compile(r"(?<![\w./~-])(?:~|/)[\w.~+@-]*(?:/[\w.~+@-]+)+")
+
+
+def from_output_paths(stdout: str, exclude: set[str], at: str | None = None, limit: int = 400) -> list[Observation]:
+    """Existing files a command printed by absolute path (shasum, ls -l, find): file-level only."""
+    out: list[Observation] = []
+    for tok in dict.fromkeys(_ABS_IN_OUTPUT.findall(stdout[:50_000])):
+        if len(out) >= limit:
+            break
+        p = os.path.normpath(os.path.expanduser(tok))
+        if p in exclude or not _isfile(p):
+            continue
+        exclude.add(p)
+        out.append(Observation(p, 0, [], "Bash-output", at, line_numbers=[]))
     return out
 
 
@@ -257,7 +300,46 @@ def from_shell_writes(command: str, cwd: str | None, at: str | None = None) -> l
             seen.add(p)
             # Content unknown: record a file-level observation with no lines.
             out.append(Observation(p, 0, [""], "Bash-redirect", at, line_numbers=[]))
+    for seg in re.split(r"\s*(?:&&|;|\|\||\n)\s*", command):
+        try:
+            argv = shlex.split(seg)
+        except ValueError:
+            continue
+        if not argv or os.path.basename(argv[0]) not in ("cp", "mv", "install", "ln"):
+            continue
+        ops = [a for a in argv[1:] if not a.startswith("-")]
+        if len(ops) < 2 or "$" in ops[-1]:
+            continue
+        dest = absolute(ops[-1])
+        for src in (x for o in ops[:-1] for x in _braces(o)):
+            p = os.path.join(dest, os.path.basename(src.rstrip("/"))) if os.path.isdir(dest) else dest
+            if p not in seen and os.path.isfile(p):
+                seen.add(p)
+                out.append(Observation(p, 0, [""], "Bash-copy", at, line_numbers=[]))  # file-level only
     return out
+
+
+def _braces(word: str) -> list[str]:
+    """One level of shell brace expansion: ``d/{a,b}.txt`` -> ``d/a.txt d/b.txt``."""
+    m = re.search(r"\{([^{}]*,[^{}]*)\}", word)
+    if not m:
+        return [word]
+    return [word[: m.start()] + part + word[m.end() :] for part in m.group(1).split(",")]
+
+
+_GH_REF = re.compile(r"\bgh\s+(?P<kind>pr|issue)\s+(?:view|merge|checks|diff|comment|close|edit|ready|review|reopen)\s+(?P<num>\d+)\b")
+_GH_REPO = re.compile(r"(?:-R|--repo)[=\s]+(?:https://github\.com/)?(?P<repo>[\w.\-]+/[\w.\-]+)")
+
+
+def gh_refs(command: str) -> set[str]:
+    """``gh pr view 12 --repo o/r`` that succeeded: the session looked at o/r#12 on GitHub."""
+    urls: set[str] = set()
+    for seg in re.split(r"\s*(?:&&|;|\|\||\||\n)\s*", command):
+        ref, repo = _GH_REF.search(seg), _GH_REPO.search(seg)
+        if ref and repo:
+            for kind in ("pull", "issues"):  # GitHub serves a PR under both
+                urls.add(normalize_url(f"https://github.com/{repo.group('repo')}/{kind}/{ref.group('num')}"))
+    return urls
 
 
 def _grep_targets(args: list[str], cwd: str | None) -> list[str] | None:
@@ -287,9 +369,14 @@ def _single_target(args: list[str], cwd: str | None) -> str | None:
     return p if os.path.isfile(p) else None
 
 
+# Segments that print nothing: they do not share the stdout with the command that read a file.
+_SILENT = re.compile(r"^(?:(?:export\s+)?[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|\S*)|cd(?:\s+\S+)?|set\s+[-+]\w+)$")
+
+
 def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None) -> list[Observation]:
     """Recognize simple file-printing commands whose stdout is a known file slice."""
     out: list[Observation] = []
+    owner: dict[int, str] = {}  # index in ``out`` -> the segment that printed it
     for segment in re.split(r"\s*(?:&&|;|\|\|)\s*", command):
         seg = segment.strip()
         if "|" in seg:
@@ -337,11 +424,56 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
         elif cmd == "nl":
             lines = [re.sub(r"^\s*\d+\t", "", x) for x in lines]
         out.append(Observation(os.path.normpath(path), start, lines, "Bash", at))
-    segments = [x for x in re.split(r"\s*(?:&&|;|\|\|)\s*", command) if x.strip()]
+        owner[len(out) - 1] = segment
+    segments = [x for x in re.split(r"\s*(?:&&|;|\|\|)\s*", command) if x.strip() and not _SILENT.match(x.strip())]
     if len(out) > 1 or (out and len(segments) > 1):
+        split = _split_by_echo_markers(segments, stdout, {owner[i].strip(): o for i, o in enumerate(out)})
+        if split is not None:
+            return split
         # Several things printed into one stdout: lines cannot be attributed; keep file-level only.
         return [Observation(o.path, 0, [], "Bash-touch", at, line_numbers=[]) for o in out]
     return out
+
+
+def _split_by_echo_markers(segments: list[str], stdout: str, printers: dict[str, Observation]) -> list[Observation] | None:
+    """``echo "--- a"; sed -n 1,9p a; echo "--- b"; cat b``: each literal echo line in stdout
+    fences off the output of the single command after it. Anything ambiguous returns None."""
+    lines = stdout.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    groups: list[list[str]] = [[]]
+    markers: list[str] = []
+    for seg in (x.strip() for x in segments):
+        m = re.fullmatch(r"echo\s+(?:\"([^\"$`\\]*)\"|'([^']*)')", seg)
+        if m:
+            markers.append(m.group(1) if m.group(1) is not None else m.group(2))
+            groups.append([])
+        else:
+            groups[-1].append(seg)
+    if not markers:
+        return None
+    # Locate each marker line in order.
+    pos, bounds = 0, []
+    for mk in markers:
+        try:
+            i = lines.index(mk, pos)
+        except ValueError:
+            return None
+        bounds.append(i)
+        pos = i + 1
+    edges = [-1, *bounds, len(lines)]
+    result: list[Observation] = []
+    for g, segs in enumerate(groups):
+        chunk = lines[edges[g] + 1 : edges[g + 1]]
+        found = [printers[x] for x in segs if x in printers]
+        if not found:
+            continue
+        o = found[0]
+        if len(segs) == 1 and len(found) == 1:
+            result.append(Observation(o.path, o.line_start, chunk, "Bash", o.at))
+        else:
+            result.extend(Observation(f.path, 0, [], "Bash-touch", f.at, line_numbers=[]) for f in found)
+    return result
 
 
 # --- transcript readers ---------------------------------------------------------
@@ -367,9 +499,13 @@ def read_claude_transcript(path: str, subagents: bool = True) -> tuple[Session, 
                 continue
             if not isinstance(e, dict):
                 continue  # a stray array or scalar line must not abort the whole check
+            if e.get("type") == "pr-link" and isinstance(e.get("prUrl"), str):
+                # The runtime records PRs the session opened or linked: the session produced that URL.
+                sess.urls.add(normalize_url(e["prUrl"]))
             if e.get("cwd"):
                 sess.cwd = sess.cwd or e["cwd"]
                 sess.cwds.add(e["cwd"])
+                sess.last_cwd = e["cwd"]
             msg = e.get("message") if isinstance(e.get("message"), dict) else {}
             content = msg.get("content")
             at = e.get("timestamp")
@@ -400,9 +536,13 @@ def read_claude_transcript(path: str, subagents: bool = True) -> tuple[Session, 
                     tur = e.get("toolUseResult")
                     # Any URL that came back from ANY tool (gh pr create, curl, WebFetch, MCP...) is sourced;
                     # inputs count only for web tools (a fetched URL), not for arbitrary commands.
-                    sess.urls |= urls_in(tur if tur is not None else c.get("content"))
-                    if _is_web_tool(name):
-                        sess.urls |= urls_in(tin)
+                    if not is_error_result(tur, c.get("content"), bool(c.get("is_error"))):
+                        # A URL inside an error ("fetch failed: https://...") was not obtained.
+                        sess.urls |= urls_in(tur if tur is not None else c.get("content"))
+                        if _is_web_tool(name):
+                            sess.urls |= urls_in(tin)
+                        if name in ("Bash", "Shell") and isinstance(tin, dict):
+                            sess.urls |= gh_refs(str(tin.get("command", "")))
                     for obs in observe_tool(
                         name, tin, tur, c.get("content"), e.get("cwd") or sess.cwd, at, bool(c.get("is_error"))
                     ):
@@ -493,7 +633,9 @@ def normalize_url(url: str) -> str:
 
 def urls_in(value: Any) -> set[str]:
     text = value if isinstance(value, str) else json.dumps(value, default=str)
-    return {normalize_url(u) for u in _URL.findall(text)}
+    from .cite import valid_url
+
+    return {normalize_url(u) for u in _URL.findall(text) if valid_url(u)}
 
 
 _ERROR_TEXT = re.compile(r"^\s*(?:Error\b|<tool_use_error>|Exit code [1-9])")
@@ -557,11 +699,19 @@ def observe_tool(
     elif name in ("Bash", "Shell"):
         stdout = structured.get("stdout") if isinstance(structured, dict) else None
         stdout = stdout if isinstance(stdout, str) else _text_of(content)
-        cmd = tool_input.get("command", "")
+        cmd = expand_assignments(tool_input.get("command", ""))
         ecwd = effective_cwd(cmd, cwd)
         produced = list(from_shell_writes(cmd, ecwd, at)) + list(from_shell(_CD.sub("", cmd, count=1), stdout, ecwd, at))
-        yield from produced
-        yield from from_shell_touches(cmd, ecwd, {o.path for o in produced}, at)
+        touched = list(from_shell_touches(cmd, ecwd, {o.path for o in produced}, at))
+        touched += from_output_paths(stdout or "", {o.path for o in produced + touched}, at)
+        if ecwd is None and _CD.match(cmd):
+            # The command moved to a directory we cannot name: relative paths in it are not
+            # evidence about any file we can name either.
+            produced = [o for o in produced if os.path.isabs(o.path)]
+            touched = [o for o in touched if os.path.isabs(o.path)]
+        # A path still holding "$VAR" names a file only the agent's shell could resolve.
+        yield from (o for o in produced if "$" not in o.path)
+        yield from (o for o in touched if "$" not in o.path)
 
 
 def iter_hook_events(lines: Iterable[str]) -> Iterator[dict[str, Any]]:
