@@ -20,7 +20,7 @@ from .db import PsqlRunner, mark_row, resolve_row
 from .gitinfo import source_for
 from .hooks import failing, run_stop
 from .ledger import Ledger
-from .observe import read_claude_transcript
+from .observe import read_transcript
 from .redact import redact_obj
 from .resolve import resolve
 from .textnorm import normalize_newlines
@@ -105,7 +105,7 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    sess, texts = read_claude_transcript(args.transcript)
+    sess, texts = read_transcript(args.transcript)
     if args.text:
         body = [open(args.text, encoding="utf-8").read()]
     elif args.all:
