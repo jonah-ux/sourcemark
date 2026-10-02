@@ -18,6 +18,10 @@ sourcemark --version
 python3 demos/demo.py        # 30-second synthetic walkthrough (from a checkout)
 ```
 
+Each [release](https://github.com/jonah-ux/sourcemark/releases) also ships a wheel, an sdist and
+`SHA256SUMS`; `pip install sourcemark-0.1.0-py3-none-any.whl` after checking the hash. Python 3.11+,
+no dependencies.
+
 ## Usage
 
 ```console
