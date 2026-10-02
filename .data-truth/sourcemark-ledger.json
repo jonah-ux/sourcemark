@@ -16,7 +16,7 @@
     }
   ],
   "facts": [
-    "sourcemark.ledger.event_chain"
+    "sourcemark.public_cli.source_contract"
   ],
   "why_trace": {
     "verdict": "GENUINE_BUG",
