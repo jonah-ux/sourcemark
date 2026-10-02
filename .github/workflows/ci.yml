@@ -33,6 +33,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Unit tests
+        env:
+          PYTHONPATH: src
         run: python -m unittest discover -s tests -v
       - name: Build sdist and wheel
         run: |
