@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+import unicodedata
 
 from .textnorm import normalize_newlines, squash
 
@@ -23,7 +24,15 @@ DEFAULT_MIN_SIMILARITY = 0.72
 # A fuzzy hit is only trusted when it is very similar, or moderately similar AND its
 # surroundings agree. Code is full of near-identical lines; similarity alone over-matches.
 STRONG_SIMILARITY = 0.90
+DISTINCTIVE_CHARS = 24  # an exact, unique quote at least this long stands on its own
+# Look-alike code shares structure: neighbouring `if y<0:` vs `if x is None:` still scores ~0.56.
+# A genuinely shifted line keeps its real neighbours (~1.0), so a short copy must clear 0.8.
+EXACT_CONTEXT_MIN = 0.8
 MIN_CONTEXT_FOR_FUZZY = 0.55
+
+
+def _nfc(text: str) -> str:
+    return unicodedata.normalize("NFC", text)
 
 
 @dataclass(frozen=True)
@@ -77,9 +86,10 @@ def locate(
     fuzzy: bool = True,
 ) -> Match | None:
     """Locate ``exact`` in ``doc``. Returns the best match or None."""
-    doc = normalize_newlines(doc)
-    exact = normalize_newlines(exact)
-    if not exact:
+    doc = _nfc(normalize_newlines(doc))
+    exact = _nfc(normalize_newlines(exact))
+    prefix, suffix = _nfc(prefix), _nfc(suffix)
+    if not exact.strip():
         return None
 
     # 1. Recorded position still holds the same text.
@@ -100,7 +110,13 @@ def locate(
 
         best = max(occ, key=rank)
         ctx = _context_score(doc, best, best + len(exact), prefix, suffix)
-        return Match(best, best + len(exact), 1.0, "exact", ctx)
+        worst = _context_score(doc, best, best + len(exact), prefix, suffix, worst=True)
+        distinctive = len(occ) == 1 and len(exact.strip()) >= DISTINCTIVE_CHARS
+        # A short or repeated line found away from its context is usually a different
+        # occurrence (e.g. `return None` in another function), not the cited one.
+        if not (prefix or suffix) or worst >= EXACT_CONTEXT_MIN or distinctive:
+            return Match(best, best + len(exact), 1.0, "exact", ctx)
+        return None
 
     # 2b. Same words, only layout changed: the citation still says the same thing.
     loose = _loose_find(doc, exact, hint_start)
