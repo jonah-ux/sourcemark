@@ -66,3 +66,32 @@ Two independent adversarial reviews and a loop over 120 real agent sessions foun
   - usage errors exit 2
   - `hook stop` honours `--ledger`
   - `python -m sourcemark` works
+
+A third review found and fixed:
+
+- **Only what the model saw counts as evidence**:
+  - the `<persisted-output>` preview, not the saved full output
+  - an Edit's written lines, not its patch context
+  - no line credit from a Read past the end
+- **Shell parsing**:
+  - chained single-file greps
+  - echo markers that are blank or occur inside printed files
+  - a `cd` part-way through a command
+  - reassigned variables
+  - redirection tokens
+  - `--color`
+- **Citations**:
+  - `path:line` inside a link label is checked
+  - relayed (subagent) citations get quote and coverage checks
+  - background-task notices no longer start a new turn
+- **Self-sourced links**: `TodoWrite`, `echo`, and `gh` text that was never run
+- **Tokens**: tokens are looked up by `check`; an unusable ledger fails tokens instead of skipping them
+- **Resolver**:
+  - a line extended in place is `edited`, not `intact`
+  - an in-place edit beats an old copy elsewhere
+  - swapped duplicates follow their context
+- **Secrets**:
+  - psql errors no longer carry the DSN
+  - more URL params, Telegram, netrc, npmrc, docker and connection-string shapes
+  - redaction is linear on long lines
+- **Ledger**: deleting the head/count rows with trailing events is caught through the event sequence

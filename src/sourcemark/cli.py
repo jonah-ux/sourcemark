@@ -21,6 +21,7 @@ from .gitinfo import source_for
 from .hooks import failing, run_stop
 from .ledger import Ledger
 from .observe import read_claude_transcript
+from .redact import redact_obj
 from .resolve import resolve
 from .textnorm import normalize_newlines
 
@@ -77,12 +78,12 @@ def cmd_resolve(args: argparse.Namespace) -> int:
             return 2
         if mark.kind == "db":
             dres = resolve_row(mark, PsqlRunner(args.dsn))
-            led.append("resolve", dres.to_dict())
+            led.append("resolve", redact_obj(dres.to_dict()))
             extra = f" changed: {', '.join(dres.changed)}" if dres.changed else ""
             _out(args, dres.to_dict(), f"{dres.status:10}{extra}  ({dres.elapsed_ms:.1f} ms)")
             return 0 if dres.status == "intact" else 1
         res = resolve(mark, roots=args.root or [])
-        led.append("resolve", res.to_dict())
+        led.append("resolve", redact_obj(res.to_dict()))
     where = f"{res.path}:{res.line_start}-{res.line_end}" if res.path else "-"
     _out(args, res.to_dict(), f"{res.status:10} {where}  ({res.elapsed_ms:.1f} ms)")
     return 0 if res.status in ("intact", "shifted", "moved") else 1

@@ -4,7 +4,7 @@
   "data_paths": [
     {
       "path": "src/sourcemark/db.py",
-      "sha256": "7fcbc5fe5bf39fe89571a2bc41dfb6875ba3bbbd00bb96afab32fc01fb4936b2"
+      "sha256": "53fb165deddf21d8c6fd689db99b32cdb313919bd6e69e5d88d0f784a34f048d"
     },
     {
       "path": "tests/test_db.py",
@@ -16,16 +16,14 @@
   ],
   "why_trace": {
     "verdict": "GENUINE_BUG",
-    "root_cause": "Citations could only point at files; a number an agent read from a database had no stable reference that could later show whether it still held.",
+    "root_cause": "PsqlRunner let subprocess.TimeoutExpired propagate; its message repeats the argv including -d <dsn>, so a database password reached the ledger's resolve event when psql timed out.",
     "evidence": [
-      "tests/test_db.py starts a throwaway PostgreSQL cluster and proves intact, drifted (only cited columns), deleted, NULL, and composite-key citations",
-      "The psql runner forces default_transaction_read_only; INSERT and data-modifying CTEs are refused in the integration test",
-      "Sensitive-looking columns are stored as fingerprints only"
+      "tests/test_resolve.py RedactionRound3Test.test_psql_timeout_does_not_carry_the_dsn uses a fake psql that sleeps past the timeout and asserts the password is absent from the error"
     ]
   },
   "documentation": [
     "README.md",
     "src/sourcemark/db.py"
   ],
-  "source_commit": "ec02edd7da7a230125222688914ae6a2c6124b21"
+  "source_commit": "b0c9e408052773f7de5ccdbf166668fd65a103ac"
 }

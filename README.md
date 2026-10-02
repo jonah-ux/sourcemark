@@ -72,10 +72,10 @@ A citation stores several independent ways to find the text again — the exact 
 
 Evaluated against real-world source files and real agent sessions (synthetic fixtures ship in `tests/`):
 
-- **Anchors**: ~1,550 mutation cases per seed (insertions, deletions, in-place edits, reindents, git renames, untracked moves, cut/paste, decoy duplicates) on 30 real-world files: **96.9%** (seed 1) and **96.5%** (held-out seed 2) correct on status *and* line *and* file, median **25 ms** per resolve. Generic one-liners that leave their file are reported `orphaned` on purpose rather than guessed.
+- **Anchors**: ~1,550 mutation cases per seed (insertions, deletions, in-place edits, reindents, git renames, untracked moves, cut/paste, decoy duplicates) on 30 real-world files: **96.7%** (seed 1) and **96.6%** (held-out seed 2) correct on status *and* line *and* file, median **25 ms** per resolve. Generic one-liners that leave their file are reported `orphaned` on purpose rather than guessed.
 - **Citation checks**: 120 real agent sessions, three seeds, with injected known-good and known-bad citations: **100%** of bad citations caught and **0** good ones flagged on every seed; median **3 ms** per session, p95 65–271 ms.
 - **Database values**: 40 citations across 4 live production tables, re-resolved against an independent raw read: **100%** agreement.
-- **Adversarial review**: two independent reviewers attacked the checker, the resolver, redaction and the ledger. Every reproduced finding (false passes first) is now a regression test.
+- **Adversarial review**: three independent reviewers attacked the checker, the resolver, redaction and the ledger. Every reproduced finding (false passes first) is now a regression test.
 
 ## Agent usage
 

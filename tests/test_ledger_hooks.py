@@ -177,8 +177,15 @@ class LedgerTamperTest(unittest.TestCase):
         self.sql("DELETE FROM events")
         self.sql("DELETE FROM marks")
         self.sql("DELETE FROM meta")
-        self.assertTrue(self.verify()["ok"])  # nothing left to contradict...
+        self.assertFalse(self.verify()["ok"])  # sqlite still remembers events were written...
+        self.sql("DELETE FROM sqlite_sequence")
+        self.assertTrue(self.verify()["ok"])  # ...a thorough rewrite leaves nothing to contradict...
         self.assertFalse(self.verify(self.anchor)["ok"])  # ...except the anchor kept elsewhere
+
+    def test_deleted_tail_and_meta_is_caught(self):
+        self.sql("DELETE FROM events WHERE seq = (SELECT max(seq) FROM events)")
+        self.sql("DELETE FROM meta WHERE key IN ('head', 'count')")
+        self.assertFalse(self.verify()["ok"])
 
     def test_prefix_lookup_is_literal(self):
         with Ledger(self.db) as led:

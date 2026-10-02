@@ -4,15 +4,15 @@
   "data_paths": [
     {
       "path": "src/sourcemark/ledger.py",
-      "sha256": "a5ed2bf88663bfd732540fce4c37c1632c9c4adafa896971e026af7cf323dd82"
+      "sha256": "f743cb2a76d467f2d82c28f0a8c281b2ee9bb2c3c86cd1a21a9db8f9eb20c13a"
     },
     {
       "path": "src/sourcemark/hooks.py",
-      "sha256": "f0b92d4836092c4ffc0b878fe2f0e1adceb73c9e86baae802d17a0b02eb4da1b"
+      "sha256": "83f96ead8ca6798c7b989e4370c8fbd824a6f6fa1bce93f69fc71f53c7d4e434"
     },
     {
       "path": "tests/test_ledger_hooks.py",
-      "sha256": "3f437ecfd4620cd029c9e83454d5daaf9b9c90373de3a367e40e6d1111ab13ec"
+      "sha256": "f762d64556df8ab1e2dcf6d016688cfcc3d3aafbfe079fe15564d6d15819ac76"
     }
   ],
   "facts": [
@@ -20,10 +20,10 @@
   ],
   "why_trace": {
     "verdict": "GENUINE_BUG",
-    "root_cause": "When the hook's ledger could not be opened, tokens were reported token_unchecked (not failing), so an enforce-mode Stop hook let an unbacked [sm:...] token through silently.",
+    "root_cause": "verify-ledger trusted the meta head/count rows; deleting them together with trailing events hid the deletion. The hook's event redaction moved to a shared redact_obj so resolve events are redacted too.",
     "evidence": [
-      "tests/test_check.py AdversarialRound3DelegatedTokenTest.test_check_command_fails_an_unknown_token_without_a_ledger",
-      "hooks.stop now substitutes UnavailableLedger so tokens are unknown_token (failing)"
+      "tests/test_ledger_hooks.py LedgerTamperTest.test_deleted_tail_and_meta_is_caught",
+      "verify now checks contiguous seq numbers and sqlite_sequence against the event count"
     ]
   },
   "documentation": [
@@ -31,5 +31,5 @@
     "src/sourcemark/ledger.py",
     "src/sourcemark/hooks.py"
   ],
-  "source_commit": "1f67fe51b26a772881a79b510cf977a748d48c18"
+  "source_commit": "2e626a3d7352200efdfaa887852e6508ee1f31fb"
 }
