@@ -303,3 +303,53 @@ class NeighbourSlideTest(unittest.TestCase):
         hit = locate(edited, q["exact"], q["prefix"], q["suffix"], hint_start=m.position["start"])
         self.assertIsNotNone(hit)
         self.assertIn("blob2", edited[hit.start : hit.end])
+
+
+class RedactionRound2Test(unittest.TestCase):
+    # Fake values are assembled at runtime so secret scanners do not flag the test file.
+    PW = "Hunter" + "2Hunter2xyz"
+
+    def test_shapes_that_reached_the_ledger(self):
+        cases = {
+            "compose list": f"    - POSTGRES_PASS" + f"WORD={self.PW}",
+            "properties": f"spring.datasource.pass" + f"word={self.PW}",
+            "my.cnf": f"pass" + f"word={self.PW}",
+            "curl basic": " ".join(["curl", "-u", "admin" + ":" + self.PW, "https://api.example.com"]),
+            "curl header": f'curl -H "X-API-Key: {self.PW}" https://api.example.com',
+            "mysql": f"mysql -uroot -p{self.PW} app",
+            "inline env": f"cd /srv && PGPASS" + f"WORD={self.PW} psql",
+            "connstring": f"Server=db;User Id=app;Pass" + f"word={self.PW};",
+            "url param": f"https://api.example.com/v1/x?api_key={self.PW}&page=2",
+        }
+        for name, text in cases.items():
+            self.assertTrue(find_secrets(text), name)
+
+    def test_ordinary_code_still_readable(self):
+        for c in [
+            "password_hash = hash(password)",
+            "token = tokens[0]",
+            "max_tokens: 4096",
+            "if (token) {",
+            "export API_KEY=$FROM_VAULT",
+            "https://example.com/search?q=hello&page=2",
+            "def check_password(user, password):",
+        ]:
+            self.assertFalse(find_secrets(c), c)
+
+    def test_hook_check_event_is_redacted(self):
+        import json
+        import sqlite3
+        from sourcemark.hooks import stop
+
+        d = tempfile.mkdtemp(prefix="sm-redhook-")
+        self.addCleanup(shutil.rmtree, d, True)
+        url = "https://hooks.slack.com/services/" + "T000/B000/" + "abcdefghijklmnop"
+        t = os.path.join(d, "s.jsonl")
+        with open(t, "w") as fh:
+            fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": f"posted to {url} and https://api.example.com/x?api_key={self.PW}"}]}}) + "\n")
+        db = os.path.join(d, "l.db")
+        stop({"transcript_path": t}, mode="shadow", ledger_path=db)
+        rows = sqlite3.connect(db).execute("select payload from events").fetchall()
+        blob = " ".join(r[0] for r in rows)
+        self.assertNotIn("abcdefghijklmnop", blob)
+        self.assertNotIn(self.PW, blob)
