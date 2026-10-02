@@ -215,3 +215,21 @@ class CliErrorTest(unittest.TestCase):
         with open(tr, "a") as fh:
             fh.write("[1, 2, 3]\n")
         self.assertEqual(self.code("check", tr)[0], 0)
+
+
+class HookLedgerFlagTest(unittest.TestCase):
+    def test_hook_stop_writes_to_the_ledger_it_was_given(self):
+        import subprocess
+        import sys
+
+        d = tempfile.mkdtemp(prefix="sm-hookled-")
+        self.addCleanup(shutil.rmtree, d, True)
+        t = os.path.join(d, "s.jsonl")
+        with open(t, "w") as fh:
+            fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "see /nope/x.py:3"}]}}) + "\n")
+        db = os.path.join(d, "given.db")
+        home = os.path.join(d, "home")
+        env = dict(os.environ, SOURCEMARK_HOME=home, SOURCEMARK_MODE="warn", PYTHONPATH=os.path.abspath("src"))
+        subprocess.run([sys.executable, "-m", "sourcemark", "--ledger", db, "hook", "stop"], input=json.dumps({"transcript_path": t}), text=True, env=env, check=True, capture_output=True)
+        self.assertTrue(os.path.isfile(db))
+        self.assertFalse(os.path.exists(os.path.join(home, "ledger.db")))
