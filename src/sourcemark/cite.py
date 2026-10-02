@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-_EXT = r"[A-Za-z0-9]{1,8}"
+_EXT = r"[A-Za-z][A-Za-z0-9]{0,7}"  # an extension starts with a letter: "3.12" or "1.26" are versions
 _PATH = rf"(?:~?/|\.{{1,2}}/)?(?:[\w.@+\-]+/)*[\w.@+\-]+\.{_EXT}"
 _LINES = r"(?P<l1>\d{1,6})(?:\s*[-–]\s*L?(?P<l2>\d{1,6}))?"
 
@@ -25,8 +25,10 @@ _HASH_L = re.compile(rf"(?<![\w/.\-])(?P<path>{_PATH})#L{_LINES}")
 _COLON = re.compile(rf"(?<![\w/.\-])(?P<path>{_PATH}):{_LINES}(?![\d])")
 _TOKEN = re.compile(r"\[sm:(?P<tok>[a-z2-7]{6,26})\]")
 _MD_URL = re.compile(r"\[(?P<label>[^\]\n]{0,200})\]\((?P<url>https?://[^)\s]+)\)")
-_BARE_URL = re.compile(r"(?<![\(\[<\w])https?://[^\s)\]>`\"']+")
+_BARE_URL = re.compile(r"(?<![\w])https?://[^\s)\]>`\"']+")
 _CODE = re.compile(r"`([^`\n]{4,200})`")
+_FENCE = re.compile(r"^(```|~~~)[^\n]*\n.*?^\1[ \t]*$", re.S | re.M)
+_TLDS = {"com", "org", "net", "io", "dev", "ai", "co", "app", "edu", "gov", "us", "uk", "de", "info", "biz", "me", "xyz"}
 _SENTENCE_BREAK = re.compile(r"(?:[.!?](?:\s|$))|\n")
 
 
@@ -55,7 +57,7 @@ def _lines(m: re.Match[str]) -> tuple[int | None, int | None]:
 
 def extract(
     text: str,
-    quote_window: int = 160,
+    quote_window: int = 48,
     known_names: set[str] | None = None,
     urls: bool = True,
 ) -> list[Citation]:
@@ -66,10 +68,19 @@ def extract(
     keeps things like ``localhost:8080`` from being mistaken for citations.
     """
     found: list[Citation] = []
-    taken: list[tuple[int, int]] = []
+    # Fenced code blocks are examples, not claims: mask them out (offsets preserved).
+    taken: list[tuple[int, int]] = [(m.start(), m.end()) for m in _FENCE.finditer(text)]
 
     def free(s: int, e: int) -> bool:
         return all(e <= a or s >= b for a, b in taken)
+
+    def plausible(path: str, start: int) -> bool:
+        if "/" not in path and path.rsplit(".", 1)[-1].lower() in _TLDS:
+            return False  # "api.example.com:443" is a host and port
+        before = text[max(0, start - 3) : start]
+        if "\\" in before or re.search(r"[A-Za-z]:\\?$", before):
+            return False  # tail of a Windows path like C:\x\y.py
+        return True
 
     if urls:
         for rx in (_MD_URL, _BARE_URL):
@@ -86,6 +97,8 @@ def extract(
                 continue
             ls, le = _lines(m)
             if form == "colon" and ls is None:
+                continue
+            if not plausible(m.group("path"), m.start("path")):
                 continue
             found.append(Citation(m.group(0), m.start(), m.end(), m.group("path"), ls, le, form=form))
             taken.append((m.start(), m.end()))
@@ -107,7 +120,8 @@ def extract(
 
 
 def _attach_quotes(text: str, cites: list[Citation], window: int) -> None:
-    """Give each inline-code quote to exactly ONE citation: the nearest one in the same sentence.
+    """Give each inline-code quote to exactly ONE citation: the nearest one in the same sentence,
+    and only when it sits right next to it (within ``window`` characters).
 
     Dense answers put several citations in one paragraph; a fixed window around each
     citation would hand one claim's quote to its neighbours.
