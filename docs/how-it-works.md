@@ -40,6 +40,17 @@ checked fragment by fragment.
 
 ## The ledger
 
-SQLite in WAL mode. Each event stores `sha256(prev_hash | kind | session | payload)`; events are
-appended inside `BEGIN IMMEDIATE` transactions so concurrent hook processes keep one chain.
-`verify-ledger` recomputes it.
+SQLite in WAL mode. Each event stores `sha256(prev_hash | kind | session | payload | at)`; events
+are appended inside `BEGIN IMMEDIATE` transactions so concurrent hook processes keep one chain.
+Ledgers created before the timestamp was chained are read as chain v1 and say so in `verify-ledger`.
+
+`verify-ledger` recomputes the chain and cross-checks the indexes against it:
+
+- the stored head and count (catches deleted or added events)
+- one `mark` event per mark, carrying the sha256 of the mark's stored body (catches edited
+  bodies, marks inserted without an event, re-vouching an edited mark, and deleted mark rows)
+- each mark's token index (catches lookups redirected to another mark)
+
+`mark` events are written only by `put_mark()`; `append()` refuses them. A database rewritten
+wholesale, with a consistent chain, is only detectable against an anchor kept elsewhere:
+`verify-ledger --write-anchor FILE` after a clean check, then `--anchor FILE` later.

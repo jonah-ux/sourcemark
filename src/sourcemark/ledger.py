@@ -1,8 +1,9 @@
 """Append-only, hash-chained local ledger (SQLite).
 
-Every event row stores ``hash = sha256(prev_hash + canonical_json(payload))``.
-Rewriting or deleting an old row breaks the chain, which ``verify()`` reports.
-Marks are also indexed by id and by short token for lookup.
+Every event row stores ``hash = sha256(prev_hash | kind | session | canonical_json(payload) | at)``.
+Rewriting, reordering, re-timing or deleting a row breaks the chain, which ``verify()`` reports.
+Marks are also indexed by id and by short token for lookup; ``verify()`` checks those indexes
+against the chain too.
 """
 
 from __future__ import annotations
@@ -54,8 +55,12 @@ def _canon(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
 
 
-def _chain(prev: str, kind: str, session: str | None, payload_json: str) -> str:
-    return hashlib.sha256(f"{prev}|{kind}|{session or ''}|{payload_json}".encode()).hexdigest()
+CHAIN_VERSION = "2"  # 2: the timestamp is chained too; 1 (older ledgers): it was not
+
+
+def _chain(prev: str, kind: str, session: str | None, payload_json: str, at: float | None = None) -> str:
+    tail = "" if at is None else f"|{at!r}"
+    return hashlib.sha256(f"{prev}|{kind}|{session or ''}|{payload_json}{tail}".encode()).hexdigest()
 
 
 class Ledger:
@@ -66,6 +71,10 @@ class Ledger:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=30000")
         self.db.executescript(SCHEMA)
+        if self.db.execute("SELECT count(*) FROM events").fetchone()[0] == 0:
+            self.db.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('chain', ?)", (CHAIN_VERSION,))
+        row = self.db.execute("SELECT value FROM meta WHERE key = 'chain'").fetchone()
+        self.chain_version = row[0] if row else "1"
 
     def close(self) -> None:
         self.db.close()
@@ -77,16 +86,24 @@ class Ledger:
         self.close()
 
     def append(self, kind: str, payload: dict[str, Any], session: str | None = None) -> str:
-        """Append an event inside an IMMEDIATE transaction so concurrent writers keep one chain."""
+        """Append an event. ``mark`` events are written only by :meth:`put_mark`, together with
+        the mark row they vouch for."""
+        if kind == "mark":
+            raise ValueError("mark events are written by put_mark(), not append()")
+        return self._append(kind, payload, session)
+
+    def _append(self, kind: str, payload: dict[str, Any], session: str | None = None) -> str:
+        """Append inside an IMMEDIATE transaction so concurrent writers keep one chain."""
         body = _canon(payload)
         self.db.execute("BEGIN IMMEDIATE")
         try:
             row = self.db.execute("SELECT hash FROM events ORDER BY seq DESC LIMIT 1").fetchone()
             prev = row[0] if row else GENESIS
-            h = _chain(prev, kind, session, body)
+            at = time.time()
+            h = _chain(prev, kind, session, body, at if self.chain_version == "2" else None)
             self.db.execute(
                 "INSERT INTO events(at, kind, session, payload, prev_hash, hash) VALUES (?,?,?,?,?,?)",
-                (time.time(), kind, session, body, prev, h),
+                (at, kind, session, body, prev, h),
             )
             n = self.db.execute("SELECT count(*) FROM events").fetchone()[0]
             self.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('head', ?), ('count', ?)", (h, str(n)))
@@ -105,7 +122,7 @@ class Ledger:
         if cur.rowcount:
             # The chain covers the mark's full stored body, so editing it later is detectable.
             body_sha = hashlib.sha256(body.encode()).hexdigest()
-            self.append("mark", {"id": mark.id, "body_sha256": body_sha, "source": mark.source}, session)
+            self._append("mark", {"id": mark.id, "body_sha256": body_sha, "source": mark.source}, session)
         return mark.id
 
     def get_mark(self, ref: str) -> Mark | None:
@@ -147,11 +164,12 @@ class Ledger:
         prev, n, broken_at = GENESIS, 0, None
         heads: list[str] = []
         mark_events: dict[str, str] = {}
-        for seq, kind, session, payload, stored_prev, h in self.db.execute(
-            "SELECT seq, kind, session, payload, prev_hash, hash FROM events ORDER BY seq"
+        timed = self.chain_version == "2"
+        for seq, at, kind, session, payload, stored_prev, h in self.db.execute(
+            "SELECT seq, at, kind, session, payload, prev_hash, hash FROM events ORDER BY seq"
         ):
             n += 1
-            if broken_at is None and (stored_prev != prev or _chain(prev, kind, session, payload) != h):
+            if broken_at is None and (stored_prev != prev or _chain(prev, kind, session, payload, at if timed else None) != h):
                 broken_at = seq
                 problems.append(f"chain broken at event {seq}")
             prev = h
@@ -159,29 +177,51 @@ class Ledger:
             if kind == "mark":
                 p = json.loads(payload)
                 if "body_sha256" in p:
-                    mark_events[p["id"]] = p["body_sha256"]
+                    if p["id"] in mark_events:
+                        problems.append(f"mark {p['id'][:14]} has more than one mark event (re-vouched after an edit?)")
+                    else:
+                        mark_events[p["id"]] = p["body_sha256"]
         meta = dict(self.db.execute("SELECT key, value FROM meta").fetchall())
-        if meta:
+        if "head" in meta or "count" in meta:
             if meta.get("head") != (heads[-1] if heads else None) or meta.get("count") != str(n):
                 problems.append(f"events missing or added: head/count say {meta.get('count')}, found {n}")
-        for mid, body in self.db.execute("SELECT id, body FROM marks"):
+        rows = set()
+        for mid, token, body in self.db.execute("SELECT id, token, body FROM marks"):
+            rows.add(mid)
             want = mark_events.get(mid)
             got = hashlib.sha256(body.encode()).hexdigest()
             if want is None:
                 problems.append(f"mark {mid[:14]} has no ledger event (inserted outside the ledger)")
             elif want != got:
                 problems.append(f"mark {mid[:14]} body differs from its chained fingerprint")
+            if token != mid[4:14]:
+                problems.append(f"mark {mid[:14]} token index was changed (lookups would be redirected)")
+            try:
+                if json.loads(body).get("id") != mid:
+                    problems.append(f"mark {mid[:14]} body carries a different id")
+            except ValueError:
+                problems.append(f"mark {mid[:14]} body is not JSON")
+        for mid in sorted(set(mark_events) - rows):
+            problems.append(f"mark {mid[:14]} was deleted (its event remains)")
+        if not timed:
+            problems_note = "chain v1: event timestamps are not covered by the hash"
+        else:
+            problems_note = None
         if anchor:
             k = int(anchor.get("count", 0))
             if k > n or (k and heads[k - 1] != anchor.get("head")):
                 problems.append(f"anchor mismatch: the first {k} events are not the anchored history")
-        return {
+        out = {
             "ok": not problems,
             "events": n,
             "broken_at": broken_at,
             "head": prev,
             "problems": problems,
+            "chain_version": self.chain_version,
         }
+        if problems_note:
+            out["note"] = problems_note
+        return out
 
     def anchor(self) -> dict[str, Any]:
         """A small record to keep OUTSIDE this database (another disk, a commit, a message)."""

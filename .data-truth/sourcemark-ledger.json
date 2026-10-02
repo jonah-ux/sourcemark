@@ -4,7 +4,7 @@
   "data_paths": [
     {
       "path": "src/sourcemark/ledger.py",
-      "sha256": "66fa7fece7f4fe2a36fa9e317b102585e7068e727feb7e99422cb67c64a2e139"
+      "sha256": "a5ed2bf88663bfd732540fce4c37c1632c9c4adafa896971e026af7cf323dd82"
     },
     {
       "path": "src/sourcemark/hooks.py",
@@ -12,7 +12,7 @@
     },
     {
       "path": "tests/test_ledger_hooks.py",
-      "sha256": "9cf845206163dcc3a43b66419faba96b837c7741b201416b5e70932f0c3f03c5"
+      "sha256": "3f437ecfd4620cd029c9e83454d5daaf9b9c90373de3a367e40e6d1111ab13ec"
     }
   ],
   "facts": [
@@ -20,9 +20,10 @@
   ],
   "why_trace": {
     "verdict": "GENUINE_BUG",
-    "root_cause": "The Stop hook stored each check event (raw cited URLs, paths and quotes) in the ledger without redaction, so a Slack webhook path or ?api_key= value in a citation was persisted in plain text.",
+    "root_cause": "verify-ledger did not cover the event timestamp in the hash, did not detect deleted mark rows or a rewritten token index, and the public append() let a caller re-vouch an edited mark body with a second mark event.",
     "evidence": [
-      "tests/test_resolve.py RedactionRound2Test.test_hook_check_event_is_redacted writes a check event and asserts neither secret appears in events.payload"
+      "tests/test_ledger_hooks.py LedgerTamperRound2Test reproduces each tampering; all now fail verification",
+      "the reviewer's own script reports TAMPERED for T1-T3 and append() refuses T4"
     ]
   },
   "documentation": [
@@ -30,5 +31,5 @@
     "src/sourcemark/ledger.py",
     "src/sourcemark/hooks.py"
   ],
-  "source_commit": "68c2aac6bb68b06d25e802291639a9f2b3363807"
+  "source_commit": "17418c1b66939dc085831421ca23a68077bcc84b"
 }
