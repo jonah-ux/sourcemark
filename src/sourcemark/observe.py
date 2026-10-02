@@ -127,7 +127,7 @@ def _pathlike(p: str) -> bool:
     p = p.strip()
     if not p or p.isdigit() or "  " in p or any(ch in p for ch in "<>|*?\t"):
         return False
-    return os.path.isfile(os.path.expanduser(p)) or bool(re.search(r"\.[A-Za-z0-9]{1,8}$", p)) or "/" in p
+    return _isfile(os.path.expanduser(p)) or bool(re.search(r"\.[A-Za-z0-9]{1,8}$", p)) or "/" in p
 
 
 _GREP_BARE = re.compile(r"^(?P<line>\d+)[:\-](?P<text>.*)$")
@@ -172,12 +172,12 @@ def from_grep_text(
             return os.path.normpath(p)
         # Output paths may be relative to the search directory OR the session directory.
         cands = [os.path.normpath(os.path.join(b, p)) for b in (cwd, alt_base) if b]
-        return next((c for c in cands if os.path.isfile(c)), cands[0] if cands else p)
+        return next((c for c in cands if _isfile(c)), cands[0] if cands else p)
 
     def in_scope(p: str) -> bool:
         if not roots:
             return True
-        rp = os.path.realpath(p)
+        rp = _realpath(p)
         return any(rp == r or rp.startswith(r.rstrip(os.sep) + os.sep) for r in roots)
 
     match_paths: set[str] = set()
@@ -249,15 +249,39 @@ def from_shell_touches(command: str, cwd: str | None, exclude: set[str], at: str
     for tok in set(_PATHISH.findall(command)):
         p = os.path.expanduser(tok)
         p = os.path.normpath(p if os.path.isabs(p) or not cwd else os.path.join(cwd, p))
-        if p in exclude or not os.path.isfile(p):
+        if p in exclude or not _isfile(p):
             continue
         exclude.add(p)
         out.append(Observation(p, 0, [], "Bash-touch", at, line_numbers=[]))
     return out
 
 
+@functools.lru_cache(maxsize=1024)
+def _root_present(root: str) -> bool:
+    return os.path.isdir(root)
+
+
+@functools.lru_cache(maxsize=65536)
+def _realpath(p: str) -> str:
+    parts = p.split(os.sep)
+    if os.path.isabs(p) and len(parts) > 3 and not _root_present(os.sep.join(parts[:3])):
+        return os.path.normpath(p)  # nothing here to resolve symlinks through
+    return os.path.realpath(p)
+
+
 @functools.lru_cache(maxsize=65536)
 def _isfile(p: str) -> bool:
+    """``os.path.isfile`` that skips paths whose top two directories are absent here.
+
+    Transcripts from other machines are full of ``/home/<user>/...``; on macOS each stat of
+    such a path goes through the automounter and costs milliseconds. One cached miss on
+    ``/home/<user>`` answers them all.
+    """
+    p = os.path.expanduser(p)
+    if os.path.isabs(p):
+        parts = p.split(os.sep)
+        if len(parts) > 3 and not _root_present(os.sep.join(parts[:3])):
+            return False
     return os.path.isfile(p)
 
 
@@ -301,6 +325,8 @@ def from_shell_writes(command: str, cwd: str | None, at: str | None = None) -> l
             # Content unknown: record a file-level observation with no lines.
             out.append(Observation(p, 0, [""], "Bash-redirect", at, line_numbers=[]))
     for seg in re.split(r"\s*(?:&&|;|\|\||\n)\s*", command):
+        if not _COPY.match(seg):
+            continue  # cheap prefix test first: shlex on every segment dominates large sessions
         try:
             argv = shlex.split(seg)
         except ValueError:
@@ -313,10 +339,13 @@ def from_shell_writes(command: str, cwd: str | None, at: str | None = None) -> l
         dest = absolute(ops[-1])
         for src in (x for o in ops[:-1] for x in _braces(o)):
             p = os.path.join(dest, os.path.basename(src.rstrip("/"))) if os.path.isdir(dest) else dest
-            if p not in seen and os.path.isfile(p):
+            if p not in seen and _isfile(p):
                 seen.add(p)
                 out.append(Observation(p, 0, [""], "Bash-copy", at, line_numbers=[]))  # file-level only
     return out
+
+
+_COPY = re.compile(r"\s*(?:\S*/)?(?:cp|mv|install|ln)\s")
 
 
 def _braces(word: str) -> list[str]:
@@ -349,7 +378,7 @@ def _grep_targets(args: list[str], cwd: str | None) -> list[str] | None:
     for t in paths or ([cwd] if cwd else []):
         t = os.path.expanduser(t)
         t = t if os.path.isabs(t) or not cwd else os.path.join(cwd, t)
-        out.append(os.path.realpath(t))
+        out.append(_realpath(t))
     return out or None
 
 
@@ -366,7 +395,7 @@ def _single_target(args: list[str], cwd: str | None) -> str | None:
         return None
     p = os.path.expanduser(files[0])
     p = os.path.normpath(p if os.path.isabs(p) or not cwd else os.path.join(cwd, p))
-    return p if os.path.isfile(p) else None
+    return p if _isfile(p) else None
 
 
 # Segments that print nothing: they do not share the stdout with the command that read a file.
@@ -689,12 +718,12 @@ def observe_tool(
         if target:
             tp = os.path.expanduser(target)
             tp = tp if os.path.isabs(tp) or not cwd else os.path.join(cwd, tp)
-            single = os.path.normpath(tp) if os.path.isfile(tp) else None
+            single = os.path.normpath(tp) if _isfile(tp) else None
         base = os.path.dirname(single) if single else (target or cwd)
         root = os.path.expanduser(target) if target else cwd
         if root and not os.path.isabs(root) and cwd:
             root = os.path.join(cwd, root)
-        roots = [os.path.realpath(root)] if root else None
+        roots = [_realpath(root)] if root else None
         yield from from_grep_text(text, base, "Grep", at, single_file=single, alt_base=cwd, roots=roots)
     elif name in ("Bash", "Shell"):
         stdout = structured.get("stdout") if isinstance(structured, dict) else None
