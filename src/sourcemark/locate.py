@@ -1,0 +1,204 @@
+"""Find a quote inside a document again, even after the document changed.
+
+The strategy follows the fuzzy-anchoring approach used by web annotation
+tools: try the recorded position, then every exact occurrence of the quote
+(disambiguated by surrounding context and distance from the old position),
+then a fuzzy search. The fuzzy search is a k-gram offset vote: every shared
+k-gram between quote and document votes for the document offset where the
+quote would start; the winning offset is then scored with a sequence matcher.
+That keeps it linear-ish on large files while tolerating edits inside the quote.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from dataclasses import dataclass
+from difflib import SequenceMatcher
+
+from .textnorm import normalize_newlines, squash
+
+DEFAULT_CONTEXT = 32
+DEFAULT_K = 8
+DEFAULT_MIN_SIMILARITY = 0.72
+# A fuzzy hit is only trusted when it is very similar, or moderately similar AND its
+# surroundings agree. Code is full of near-identical lines; similarity alone over-matches.
+STRONG_SIMILARITY = 0.90
+MIN_CONTEXT_FOR_FUZZY = 0.55
+
+
+@dataclass(frozen=True)
+class Match:
+    start: int
+    end: int
+    similarity: float  # 1.0 == exact quote text
+    method: str  # "position" | "exact" | "loose" | "fuzzy"
+    context_score: float  # 0..1, how well prefix/suffix agree
+
+
+def _context_score(doc: str, start: int, end: int, prefix: str, suffix: str) -> float:
+    if not prefix and not suffix:
+        return 1.0
+    scores = []
+    if prefix:
+        got = doc[max(0, start - len(prefix)) : start]
+        scores.append(SequenceMatcher(None, got, prefix, autojunk=False).ratio())
+    if suffix:
+        got = doc[end : end + len(suffix)]
+        scores.append(SequenceMatcher(None, got, suffix, autojunk=False).ratio())
+    return sum(scores) / len(scores)
+
+
+def _all_occurrences(doc: str, needle: str) -> list[int]:
+    out, i = [], doc.find(needle)
+    while i != -1:
+        out.append(i)
+        i = doc.find(needle, i + 1)
+    return out
+
+
+def locate(
+    doc: str,
+    exact: str,
+    prefix: str = "",
+    suffix: str = "",
+    hint_start: int | None = None,
+    *,
+    k: int = DEFAULT_K,
+    min_similarity: float = DEFAULT_MIN_SIMILARITY,
+    strong_similarity: float = STRONG_SIMILARITY,
+    min_context: float = MIN_CONTEXT_FOR_FUZZY,
+    max_fuzzy_len: int = 20000,
+    fuzzy: bool = True,
+) -> Match | None:
+    """Locate ``exact`` in ``doc``. Returns the best match or None."""
+    doc = normalize_newlines(doc)
+    exact = normalize_newlines(exact)
+    if not exact:
+        return None
+
+    # 1. Recorded position still holds the same text.
+    if hint_start is not None and doc[hint_start : hint_start + len(exact)] == exact:
+        ctx = _context_score(doc, hint_start, hint_start + len(exact), prefix, suffix)
+        return Match(hint_start, hint_start + len(exact), 1.0, "position", ctx)
+
+    # 2. Exact text elsewhere; choose by context, then by distance to the hint.
+    occ = _all_occurrences(doc, exact)
+    if occ:
+        def rank(pos: int) -> tuple[float, float]:
+            ctx = _context_score(doc, pos, pos + len(exact), prefix, suffix)
+            dist = abs(pos - hint_start) if hint_start is not None else 0
+            return (ctx, -dist)
+
+        best = max(occ, key=rank)
+        ctx = _context_score(doc, best, best + len(exact), prefix, suffix)
+        return Match(best, best + len(exact), 1.0, "exact", ctx)
+
+    # 2b. Same words, different whitespace layout (reindent / reflow).
+    loose = _loose_find(doc, exact, hint_start)
+    if loose is not None:
+        s, e = loose
+        # Same words, only layout changed: the citation still says the same thing.
+        return Match(s, e, 1.0, "loose", _context_score(doc, s, e, prefix, suffix))
+
+    # 3. Fuzzy: k-gram offset voting, then score the winning windows.
+    if not fuzzy or len(exact) > max_fuzzy_len:
+        return None
+    m = _fuzzy(doc, exact, prefix, suffix, hint_start, k, min_similarity)
+    if m is None:
+        return None
+    if m.similarity >= strong_similarity:
+        return m
+    if (prefix or suffix) and m.context_score >= min_context:
+        return m
+    return None
+
+
+def _loose_find(doc: str, exact: str, hint_start: int | None) -> tuple[int, int] | None:
+    """Find ``exact`` ignoring whitespace differences; map back to raw offsets."""
+    target = squash(exact)
+    if not target:
+        return None
+    # Build squashed doc with a map from squashed index -> raw index.
+    raw_idx: list[int] = []
+    chars: list[str] = []
+    prev_ws = True
+    for i, ch in enumerate(doc):
+        if ch.isspace():
+            if not prev_ws:
+                chars.append(" ")
+                raw_idx.append(i)
+            prev_ws = True
+        else:
+            chars.append(ch)
+            raw_idx.append(i)
+            prev_ws = False
+    sq = "".join(chars)
+    hits = _all_occurrences(sq, target)
+    if not hits:
+        return None
+    if hint_start is not None:
+        hits.sort(key=lambda h: abs(raw_idx[h] - hint_start))
+    h = hits[0]
+    start = raw_idx[h]
+    end = raw_idx[h + len(target) - 1] + 1
+    return start, end
+
+
+def _fuzzy(
+    doc: str,
+    exact: str,
+    prefix: str,
+    suffix: str,
+    hint_start: int | None,
+    k: int,
+    min_similarity: float,
+) -> Match | None:
+    k = max(3, min(k, len(exact)))
+    grams: dict[str, list[int]] = {}
+    for i in range(0, len(exact) - k + 1):
+        grams.setdefault(exact[i : i + k], []).append(i)
+    if not grams:
+        return None
+
+    votes: Counter[int] = Counter()
+    # Coarse bucket so small insertions/deletions inside the quote still agree.
+    bucket = max(8, len(exact) // 8)
+    for j in range(0, len(doc) - k + 1):
+        positions = grams.get(doc[j : j + k])
+        if positions:
+            for p in positions[:4]:
+                votes[(j - p) // bucket] += 1
+    if not votes:
+        return None
+
+    best: Match | None = None
+    slack = max(16, len(exact) // 4)
+    for b, _count in votes.most_common(5):
+        approx = max(0, b * bucket)
+        lo = max(0, approx - slack)
+        hi = min(len(doc), approx + len(exact) + 2 * slack + bucket)
+        window = doc[lo:hi]
+        sm = SequenceMatcher(None, window, exact, autojunk=False)
+        blocks = [blk for blk in sm.get_matching_blocks() if blk.size]
+        if not blocks:
+            continue
+        s = lo + blocks[0].a
+        e = lo + blocks[-1].a + blocks[-1].size
+        sim = SequenceMatcher(None, doc[s:e], exact, autojunk=False).ratio()
+        if sim < min_similarity:
+            continue
+        ctx = _context_score(doc, s, e, prefix, suffix)
+        cand = Match(s, e, sim, "fuzzy", ctx)
+        if best is None or _better(cand, best, hint_start):
+            best = cand
+    return best
+
+
+def _better(a: Match, b: Match, hint_start: int | None) -> bool:
+    sa = a.similarity * 0.8 + a.context_score * 0.2
+    sb = b.similarity * 0.8 + b.context_score * 0.2
+    if abs(sa - sb) > 1e-9:
+        return sa > sb
+    if hint_start is None:
+        return False
+    return abs(a.start - hint_start) < abs(b.start - hint_start)
