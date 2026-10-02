@@ -97,3 +97,53 @@ class HelpersTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AnchorPrecisionTest(unittest.TestCase):
+    """Regression tests for adversarial anchoring findings."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="sm-anchor-")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def write(self, name, text):
+        p = os.path.join(self.dir, name)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def test_deleted_short_line_does_not_jump_to_duplicate(self):
+        body = "def alpha(x):\n    if x is None:\n        return None\n    return x+1\n\ndef beta(y):\n    if y<0:\n        return None\n    return y*2\n"
+        p = self.write("dup.py", body)
+        from sourcemark.anchor import TextSource
+        m = mark_lines(body, 8, 8, TextSource(path=p))
+        lines = body.split("\n")
+        del lines[7]
+        self.write("dup.py", "\n".join(lines))
+        self.assertEqual(resolve(m, roots=[self.dir]).status, "orphaned")
+
+    def test_blank_lines_cannot_be_cited(self):
+        from sourcemark.anchor import TextSource
+        with self.assertRaises(ValueError):
+            mark_lines("first\n\nsecond\n", 2, 2, TextSource(path="/x"))
+
+    def test_boilerplate_does_not_move_to_another_file(self):
+        body = "import os\nfrom __future__ import annotations\nimport sys\n"
+        p = self.write("a/c.py", body)
+        self.write("b/other.py", "# other\nfrom __future__ import annotations\n# unrelated\n")
+        from sourcemark.anchor import TextSource
+        m = mark_lines(body, 2, 2, TextSource(path=p))
+        self.write("a/c.py", "import os\nimport sys\n")
+        self.assertEqual(resolve(m, roots=[self.dir]).status, "orphaned")
+
+    def test_unicode_normalization_is_not_an_edit(self):
+        import unicodedata
+        body = "intro\nRésumé café naïve façade — the cited line\noutro\n"
+        p = self.write("u.txt", unicodedata.normalize("NFC", body))
+        from sourcemark.anchor import TextSource
+        m = mark_lines(unicodedata.normalize("NFC", body), 2, 2, TextSource(path=p))
+        self.write("u.txt", unicodedata.normalize("NFD", body))
+        self.assertIn(resolve(m).status, ("intact", "shifted"))

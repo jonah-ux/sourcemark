@@ -94,6 +94,8 @@ def mark_text(
     if not (0 <= start < end <= len(doc)):
         raise ValueError(f"bad span {start}:{end} for document of length {len(doc)}")
     exact = doc[start:end]
+    if not exact.strip():
+        raise ValueError("cannot cite whitespace only: it matches everywhere")
     prefix = doc[max(0, start - context) : start]
     suffix = doc[end : end + context]
     offsets = line_offsets(doc)
