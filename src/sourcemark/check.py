@@ -229,7 +229,11 @@ def check_citation(c: Citation, session: Session, *, now: bool = False, ledger: 
         if ledger is None:
             out.verdict, out.detail = "token_unchecked", "no ledger supplied to look the token up"
             return out
-        mark = ledger.get_mark(c.token)
+        try:
+            mark = ledger.get_mark(c.token)
+        except LookupError as e:  # ambiguous prefix: unknown, never an exception that skips the turn
+            out.verdict, out.detail = "unknown_token", str(e)
+            return out
         if mark is None:
             out.verdict, out.detail = "unknown_token", "no mark with this token in the ledger"
             return out
@@ -345,7 +349,10 @@ def check_citation(c: Citation, session: Session, *, now: bool = False, ledger: 
 def check_text(text: str, session: Session, *, now: bool = False, ledger: Any = None) -> Report:
     rep = Report()
     for c in extract(text, known_names=session.basenames()):
-        rep.checks.append(check_citation(c, session, now=now, ledger=ledger))
+        try:
+            rep.checks.append(check_citation(c, session, now=now, ledger=ledger))
+        except Exception as e:  # one bad citation must not drop the others from the check
+            rep.checks.append(CitationCheck(raw=c.raw, verdict="unresolved", path=c.path, detail=f"check failed: {e}"))
     return rep
 
 

@@ -150,6 +150,13 @@ def _attach_quotes(text: str, cites: list[Citation], window: int) -> None:
         return
     for m in _CODE.finditer(text):
         q = m.group(1)
+        owner = next(
+            (c for c in path_cites if c.form == "markdown" and c.start < m.start() and m.end() <= c.start + c.raw.find("](")),
+            None,
+        )
+        if owner is not None:
+            owner.claimed_quotes.append(q)  # [`code`](file#L10): the label IS the claim about the lines
+            continue
         if re.fullmatch(rf"{_PATH}(?::\d+(?:[-–]\d+)?)?", q.strip()) or any(q in c.raw for c in path_cites):
             continue  # the code span IS a citation, not a quote
         best: Citation | None = None

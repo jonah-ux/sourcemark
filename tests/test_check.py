@@ -205,7 +205,7 @@ class SingleFileGrepTest(unittest.TestCase):
         shutil.rmtree(self.d, ignore_errors=True)
 
     def test_bash_grep_single_file(self):
-        obs = from_shell(f"wc -l inject.py && grep -n 'budget' inject.py", "2000 inject.py\n1079:    budget = 1\n1335:    render()\n", self.d)
+        obs = from_shell(f"wc -l inject.py && grep -n 'budget' inject.py", "2000 inject.py\n1079:    budget = 1\n1335:    render(budget)\n", self.d)
         self.assertEqual(obs[0].path, self.f)
         self.assertEqual(obs[0].line_numbers, [1079, 1335])
 
@@ -524,3 +524,91 @@ class StrictnessTest(unittest.TestCase):
         from sourcemark.hooks import FAILING
         self.assertIn("unresolved", FAILING)
         self.assertIn("unknown_token", FAILING)
+
+
+class AdversarialRound2CheckTest(unittest.TestCase):
+    """Second independent adversarial review: false passes in the session evidence."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="sm-adv2-")
+        self.addCleanup(shutil.rmtree, self.d, True)
+
+    def file(self, name, lines):
+        p = os.path.join(self.d, name)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+        return p
+
+    def shell(self, cmd, stdout):
+        from sourcemark.observe import observe_tool
+
+        s = Session(cwd=self.d)
+        for o in observe_tool("Bash", {"command": cmd}, {"stdout": stdout}, "", self.d, None):
+            s.add(o)
+        return s
+
+    def verdict(self, s, text):
+        return check_text(text, s).checks[0].verdict
+
+    def test_linter_output_beside_a_grep_is_not_grep_hits(self):
+        self.file("src/pipeline.py", [f"x{i}" for i in range(120)])
+        s = self.shell("ruff check src; rg -n 'import json' src", "src/pipeline.py:97:5: F821 undefined name\nsrc/a.py:3:import json\n")
+        self.assertNotEqual(self.verdict(s, "see src/pipeline.py:97"), "verified")
+
+    def test_rg_without_line_numbers_gives_no_lines(self):
+        self.file("server.log", ["a", "b", "c", "2024-01-15 ERROR db timeout"])
+        s = self.shell("rg ERROR server.log", "2024-01-15 ERROR db timeout\n")
+        self.assertNotEqual(self.verdict(s, "see server.log:2024"), "verified")
+        s = self.shell("rg -n ERROR server.log", "4:2024-01-15 ERROR db timeout\n")
+        self.assertEqual(self.verdict(s, "see server.log:4"), "verified")
+
+    def test_grep_tool_with_n_false_gives_no_lines(self):
+        from sourcemark.observe import observe_tool
+
+        p = self.file("server.log", ["a", "2024-01-15 ERROR db timeout"])
+        s = Session(cwd=self.d)
+        for o in observe_tool("Grep", {"pattern": "ERROR", "path": p, "output_mode": "content", "-n": False}, {"content": "2024-01-15 ERROR db timeout"}, "", self.d, None):
+            s.add(o)
+        self.assertNotEqual(self.verdict(s, f"see {p}:2024"), "verified")
+
+    def test_sed_with_two_ranges_is_not_line_evidence(self):
+        self.file("app.py", [f"line_{i} = compute_{i}(x)" for i in range(1, 120)])
+        out = "\n".join([f"line_{i} = compute_{i}(x)" for i in (*range(1, 6), *range(100, 106))]) + "\n"
+        s = self.shell("sed -n -e '1,5p' -e '100,105p' app.py", out)
+        self.assertNotEqual(self.verdict(s, "app.py:7 has `line_101 = compute_101(x)`"), "verified")
+
+    def test_appending_heredoc_is_not_lines_one_to_n(self):
+        self.file("notes.py", [f"old{i}" for i in range(100)])
+        s = self.shell("tee -a notes.py <<'EOF'\nappended = 1\nEOF", "appended = 1\n")
+        self.assertNotEqual(self.verdict(s, "notes.py:1 has `appended = 1`"), "verified")
+
+    def test_heredoc_first_form_is_a_write(self):
+        self.file("gen.py", ["def gen():", "    return 42"])
+        s = self.shell("cat <<'EOF' > gen.py\ndef gen():\n    return 42\nEOF", "")
+        self.assertEqual(self.verdict(s, "gen.py:2 has `return 42`"), "verified")
+
+    def test_quote_in_a_markdown_link_label_is_checked(self):
+        s = Session(cwd=self.d)
+        p = self.file("calc.py", [f"v{i} = {i}" for i in range(1, 20)])
+        s.add(Observation(path=p, line_start=1, lines=[f"v{i} = {i}" for i in range(1, 20)], tool="Read"))
+        self.assertEqual(self.verdict(s, "[`drop_all_tables(db)`](calc.py#L10)"), "quote_mismatch")
+        self.assertEqual(self.verdict(s, "[`v10 = 10`](calc.py#L10)"), "verified")
+
+    def test_option_values_are_not_pattern_or_path(self):
+        p = self.file("src/routes.py", [f"r{i}" for i in range(40)])
+        for cmd, out in (
+            ("rg -n -C 2 r30 src/routes.py", "29-r28\n30:r29\n31-r30\n"),
+            ("rg -n -g '*.py' r29 src/routes.py", "30:r29\n"),
+            ("grep -n -A 2 r29 src/routes.py", "30:r29\n31-r30\n32-r31\n"),
+        ):
+            s = self.shell(cmd, out)
+            self.assertEqual(self.verdict(s, "see src/routes.py:30"), "verified", cmd)
+
+    def test_ambiguous_token_is_unknown_not_a_crash(self):
+        class Amb:
+            def get_mark(self, ref):
+                raise LookupError("2 marks start with 'abcdef'")
+
+        r = check_text("see [sm:abcdef] and /etc/never_read_file.conf:12", Session(cwd=self.d), ledger=Amb())
+        self.assertEqual([c.verdict for c in r.checks][0], "unknown_token")
