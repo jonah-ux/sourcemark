@@ -126,3 +126,61 @@ class CliTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LedgerTamperTest(unittest.TestCase):
+    """Regression tests for tampering the adversarial review showed verify() missed."""
+
+    def setUp(self):
+        from sourcemark.anchor import TextSource, mark_lines
+        self.dir = tempfile.mkdtemp(prefix="sm-tamper-")
+        self.db = os.path.join(self.dir, "l.db")
+        body = "".join(f"beta line {i} here\n" for i in range(1, 6))
+        with Ledger(self.db) as led:
+            self.mark = mark_lines(body, 2, 2, TextSource(path="/x"))
+            led.put_mark(self.mark)
+            for i in range(3):
+                led.append("note", {"i": i})
+            self.assertTrue(led.verify()["ok"])
+            self.anchor = led.anchor()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def sql(self, q, *args):
+        con = sqlite3.connect(self.db)
+        con.execute(q, args)
+        con.commit()
+        con.close()
+
+    def verify(self, anchor=None):
+        with Ledger(self.db) as led:
+            return led.verify(anchor)
+
+    def test_delete_last_event(self):
+        self.sql("DELETE FROM events WHERE seq = (SELECT max(seq) FROM events)")
+        self.assertFalse(self.verify()["ok"])
+
+    def test_delete_all_events(self):
+        self.sql("DELETE FROM events")
+        self.assertFalse(self.verify()["ok"])
+
+    def test_edit_mark_body(self):
+        self.sql("UPDATE marks SET body = replace(body, 'beta line 2 here', 'beta TAMPERED')")
+        self.assertFalse(self.verify()["ok"])
+
+    def test_forged_mark_row(self):
+        self.sql("INSERT INTO marks(id, token, kind, body, created_at) VALUES ('sm1_forged', 'forgedxxxx', 'text', '{}', 0)")
+        self.assertFalse(self.verify()["ok"])
+
+    def test_wholesale_rewrite_caught_by_anchor(self):
+        self.sql("DELETE FROM events")
+        self.sql("DELETE FROM marks")
+        self.sql("DELETE FROM meta")
+        self.assertTrue(self.verify()["ok"])  # nothing left to contradict...
+        self.assertFalse(self.verify(self.anchor)["ok"])  # ...except the anchor kept elsewhere
+
+    def test_prefix_lookup_is_literal(self):
+        with Ledger(self.db) as led:
+            self.assertIsNone(led.get_mark("______"))
+            self.assertIsNotNone(led.get_mark(self.mark.id[4:12]))
