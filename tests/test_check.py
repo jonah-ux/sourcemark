@@ -154,3 +154,14 @@ class SessionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PathNormalizationTest(unittest.TestCase):
+    def test_dot_directory_and_tilde(self):
+        from sourcemark.observe import Observation
+        home = os.path.expanduser("~")
+        sess = Session(cwd=home)
+        sess.add(Observation("~/.config/tool/settings.toml", 1, ["a", "b", "c"], "Read"))
+        self.assertEqual(check_text("see ~/.config/tool/settings.toml:2", sess).checks[0].verdict, "verified")
+        self.assertEqual(check_text("see .config/tool/settings.toml:2", sess).checks[0].verdict, "verified")
+        self.assertEqual(check_text(f"see {home}/.config/tool/settings.toml:3", sess).checks[0].verdict, "verified")

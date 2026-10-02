@@ -35,7 +35,13 @@ class Match:
     context_score: float  # 0..1, how well prefix/suffix agree
 
 
-def _context_score(doc: str, start: int, end: int, prefix: str, suffix: str) -> float:
+def _context_score(doc: str, start: int, end: int, prefix: str, suffix: str, *, worst: bool = False) -> float:
+    """Agreement of the text around [start, end) with the recorded prefix/suffix.
+
+    ``worst=True`` returns the weaker side: a deleted span leaves its prefix and
+    suffix adjacent, so one side can agree with a *neighbouring* line while the
+    other does not. Trust requires both sides.
+    """
     if not prefix and not suffix:
         return 1.0
     scores = []
@@ -45,7 +51,7 @@ def _context_score(doc: str, start: int, end: int, prefix: str, suffix: str) -> 
     if suffix:
         got = doc[end : end + len(suffix)]
         scores.append(SequenceMatcher(None, got, suffix, autojunk=False).ratio())
-    return sum(scores) / len(scores)
+    return min(scores) if worst else sum(scores) / len(scores)
 
 
 def _all_occurrences(doc: str, needle: str) -> list[int]:
@@ -79,38 +85,55 @@ def locate(
     # 1. Recorded position still holds the same text.
     if hint_start is not None and doc[hint_start : hint_start + len(exact)] == exact:
         ctx = _context_score(doc, hint_start, hint_start + len(exact), prefix, suffix)
-        return Match(hint_start, hint_start + len(exact), 1.0, "position", ctx)
+        # A decoy copy can land on the old offset; only trust it if the context agrees
+        # or if it is the only copy.
+        if ctx >= 0.5 or doc.count(exact) == 1:
+            return Match(hint_start, hint_start + len(exact), 1.0, "position", ctx)
 
-    # 2. Exact text elsewhere; choose by context, then by distance to the hint.
-    occ = _all_occurrences(doc, exact)
-    if occ:
-        def rank(pos: int) -> tuple[float, float]:
-            ctx = _context_score(doc, pos, pos + len(exact), prefix, suffix)
-            dist = abs(pos - hint_start) if hint_start is not None else 0
-            return (ctx, -dist)
+    # 2+. Gather every candidate and score them on ONE scale. A far-away copy whose
+    # surroundings disagree must not beat an edited line sitting in its original context.
+    cands: list[Match] = []
+    for pos in _all_occurrences(doc, exact):
+        cands.append(Match(pos, pos + len(exact), 1.0, "exact", _context_score(doc, pos, pos + len(exact), prefix, suffix)))
+    if not cands:
+        loose = _loose_find(doc, exact, hint_start)
+        if loose is not None:
+            s_, e_ = loose
+            cands.append(Match(s_, e_, 1.0, "loose", _context_score(doc, s_, e_, prefix, suffix)))
 
-        best = max(occ, key=rank)
-        ctx = _context_score(doc, best, best + len(exact), prefix, suffix)
-        return Match(best, best + len(exact), 1.0, "exact", ctx)
+    def worst(m: Match) -> float:
+        return _context_score(doc, m.start, m.end, prefix, suffix, worst=True)
 
-    # 2b. Same words, different whitespace layout (reindent / reflow).
-    loose = _loose_find(doc, exact, hint_start)
-    if loose is not None:
-        s, e = loose
-        # Same words, only layout changed: the citation still says the same thing.
-        return Match(s, e, 1.0, "loose", _context_score(doc, s, e, prefix, suffix))
+    best = max(cands, key=lambda m: _score(m, worst(m), hint_start, len(doc))) if cands else None
+    # An exact/loose hit with poor surroundings may be a coincidental copy; let a fuzzy
+    # candidate near the old position compete.
+    if fuzzy and len(exact) <= max_fuzzy_len and (best is None or ((prefix or suffix) and worst(best) < 0.5)):
+        fz = _fuzzy(doc, exact, prefix, suffix, hint_start, k, min_similarity)
+        if fz is not None and _trusted_fuzzy(doc, fz, prefix, suffix, hint_start, strong_similarity, min_context):
+            if best is None or _score(fz, worst(fz), hint_start, len(doc)) > _score(best, worst(best), hint_start, len(doc)):
+                best = fz
+    return best
 
-    # 3. Fuzzy: k-gram offset voting, then score the winning windows.
-    if not fuzzy or len(exact) > max_fuzzy_len:
-        return None
-    m = _fuzzy(doc, exact, prefix, suffix, hint_start, k, min_similarity)
-    if m is None:
-        return None
-    if m.similarity >= strong_similarity:
-        return m
-    if (prefix or suffix) and m.context_score >= min_context:
-        return m
-    return None
+
+def _score(m: Match, worst_ctx: float, hint_start: int | None, doc_len: int) -> float:
+    """Similarity dominates; two-sided context and proximity to the old offset break ties."""
+    prox = 0.0
+    if hint_start is not None and doc_len:
+        prox = 1.0 - min(1.0, abs(m.start - hint_start) / max(1, doc_len))
+    return 0.55 * m.similarity + 0.35 * worst_ctx + 0.10 * prox
+
+
+def _trusted_fuzzy(doc, m, prefix, suffix, hint_start, strong, min_ctx) -> bool:
+    if m.similarity >= strong:
+        return True
+    if (prefix or suffix) and _context_score(doc, m.start, m.end, prefix, suffix, worst=True) >= min_ctx:
+        return True
+    # Edited in place: a moderately similar match within a few lines of where it was.
+    if hint_start is not None and m.similarity >= 0.75:
+        lo, hi = sorted((hint_start, m.start))
+        if doc.count("\n", lo, hi) <= 3:
+            return True
+    return False
 
 
 def _loose_find(doc: str, exact: str, hint_start: int | None) -> tuple[int, int] | None:
