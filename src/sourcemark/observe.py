@@ -1008,6 +1008,188 @@ def _text_of(content: Any) -> str:
     return ""
 
 
+
+# --- Codex rollouts -----------------------------------------------------------
+#
+# Codex runs tools from small JavaScript cells: ``const r = await tools.exec_command({cmd: "...",
+# workdir: "..."}); text(r.output);``. The cell's output is whatever the JS printed, not the
+# command's stdout. Only cells that call exec_command once, with literal arguments, and print its
+# output unchanged, are read as "this command printed this"; any other cell still sources URLs.
+
+_JS_LIT = r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|`(?:[^`\\$]|\\.)*`"
+_JS_PAIR = re.compile(rf"\s*(?:\"(\w+)\"|'(\w+)'|(\w+))\s*:\s*({_JS_LIT}|-?\d+(?:\.\d+)?|true|false|null)\s*,?")
+_JS_CALL = re.compile(r"tools\.exec_command\(\s*\{(?P<obj>(?:[^{}`\"']|" + _JS_LIT + r")*)\}\s*\)", re.S)
+_CELL_FORMS = {
+    re.compile(r"(?:const|let|var) (\w+) ?= ?await CALL;? ?text\(\1\.output\);?"): "raw",
+    re.compile(r"text\(\(await CALL\)\.output\);?"): "raw",
+    re.compile(r"(?:const|let|var) (\w+) ?= ?await CALL;? ?text\((?:JSON\.stringify\()?\1\)?\);?"): "json",
+    re.compile(r"text\((?:JSON\.stringify\()?await CALL\)?\);?"): "json",
+}
+_CODEX_DELEGATING = ("wait_agent", "read_thread", "wait_threads")
+_CODEX_AUTHORING = ("send_message", "spawn_agent", "followup_task")
+
+
+def _js_string(lit: str) -> str | None:
+    """Decode a JS string literal; None for a template with ``${...}`` (the value is unknown)."""
+    q, body = lit[0], lit[1:-1]
+    if q == "`" and "${" in body:
+        return None
+    out, i = [], 0
+    simple = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\" or i + 1 == len(body):
+            out.append(ch)
+            i += 1
+            continue
+        nxt = body[i + 1]
+        if nxt == "u" and re.fullmatch(r"[0-9a-fA-F]{4}", body[i + 2 : i + 6]):
+            out.append(chr(int(body[i + 2 : i + 6], 16)))
+            i += 6
+        elif nxt == "x" and re.fullmatch(r"[0-9a-fA-F]{2}", body[i + 2 : i + 4]):
+            out.append(chr(int(body[i + 2 : i + 4], 16)))
+            i += 4
+        elif nxt == "\n":
+            i += 2  # line continuation
+        else:
+            out.append(simple.get(nxt, nxt))
+            i += 2
+    return "".join(out)
+
+
+def codex_exec_cell(code: str) -> tuple[dict[str, Any], str] | None:
+    """(arguments, "raw"|"json") for a cell that runs one literal exec_command and prints its
+    output as-is; None for anything else."""
+    code = re.sub(r"^\s*//[^\n]*\n", "", code)
+    if code.count("tools.") != 1:
+        return None
+    m = _JS_CALL.search(code)
+    if not m:
+        return None
+    args: dict[str, Any] = {}
+    pos, obj = 0, m.group("obj")
+    while pos < len(obj.rstrip()):
+        pm = _JS_PAIR.match(obj, pos)
+        if not pm or pm.end() == pos:
+            return None  # a computed value: not a literal call
+        key, val = pm.group(1) or pm.group(2) or pm.group(3), pm.group(4)
+        args[key] = _js_string(val) if val[0] in "\"'`" else val
+        pos = pm.end()
+    if not isinstance(args.get("cmd"), str):
+        return None
+    rest = " ".join((code[: m.start()] + "CALL" + code[m.end() :]).split())
+    for rx, form in _CELL_FORMS.items():
+        if rx.fullmatch(rest):
+            return args, form
+    return None
+
+
+def _codex_text(out: Any) -> str:
+    """Codex splits one output into parts ("...Output:\\n", then the stdout): concatenate them as
+    they are. Joining with newlines would insert a line and shift every line number by one."""
+    if isinstance(out, list):
+        return "".join(x.get("text", "") for x in out if isinstance(x, dict))
+    return out if isinstance(out, str) else ""
+
+
+def _codex_output(out: Any) -> str | None:
+    text = _codex_text(out)
+    m = re.match(r"Script completed\n(?:Wall time[^\n]*\n)?Output:\n", text)
+    return text[m.end() :] if m else None
+
+
+def read_codex_transcript(path: str) -> tuple[Session, list[tuple[str, str]]]:
+    """Parse a Codex rollout (``~/.codex/sessions/.../rollout-*.jsonl``). Same contract as
+    :func:`read_claude_transcript`. Forked subagent threads live in their own rollouts and are
+    not loaded; their reports reach this session as delegated URLs."""
+    sess = Session()
+    texts: list[tuple[str, str]] = []
+    calls: dict[str, tuple[str, str]] = {}  # call_id -> (name, input)
+    turn = 0
+    cwd: str | None = None
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(e, dict) or not isinstance(e.get("payload"), dict):
+                continue
+            p, at = e["payload"], e.get("timestamp")
+            if e.get("type") == "turn_context" and isinstance(p.get("cwd"), str):
+                cwd = p["cwd"]
+                sess.cwd = sess.cwd or cwd
+                sess.cwds.add(cwd)
+                sess.last_cwd = cwd
+                continue
+            if e.get("type") != "response_item":
+                continue
+            kind = p.get("type")
+            if kind == "message":
+                body = "\n".join(c.get("text", "") for c in p.get("content") or [] if isinstance(c, dict))
+                if p.get("role") == "assistant":
+                    texts.append((at or "", body))
+                    sess.text_turns.append(turn)
+                elif p.get("role") == "user":
+                    if not body.lstrip().startswith("<"):
+                        turn += 1  # a human prompt, not an injected <environment_context> block
+                    sess.urls |= urls_in(body)
+            elif kind in ("custom_tool_call", "function_call"):
+                calls[p.get("call_id", "")] = (p.get("name", ""), p.get("input") or p.get("arguments") or "")
+            elif kind in ("custom_tool_call_output", "function_call_output"):
+                name, code = calls.get(p.get("call_id", ""), ("", ""))
+                out = p.get("output")
+                text = _codex_text(out)
+                if any(t in code or t == name for t in _CODEX_AUTHORING):
+                    continue  # the agent's own words echoed back
+                if any(t in code or t == name for t in _CODEX_DELEGATING):
+                    sess.delegated_urls |= urls_in(text)
+                    continue
+                if name != "exec":
+                    continue
+                sess.urls |= urls_in(text) - urls_in(code)  # `echo https://x` returns what was typed
+                cell = codex_exec_cell(code)
+                stdout = _codex_output(out)
+                if cell is None or stdout is None:
+                    continue
+                args, form = cell
+                exit_code = 0
+                if form == "json":
+                    try:
+                        res = json.loads(stdout)
+                    except ValueError:
+                        continue
+                    if not isinstance(res, dict) or not isinstance(res.get("output"), str):
+                        continue
+                    stdout, exit_code = res["output"], res.get("exit_code") or 0
+                cmd = expand_assignments(args["cmd"])
+                wd = args.get("workdir") if isinstance(args.get("workdir"), str) else None
+                ecwd = os.path.join(cwd, wd) if wd and cwd and not os.path.isabs(wd) else (wd or cwd)
+                sess.urls |= gh_refs(cmd, stdout)
+                if exit_code or stdout.startswith("Warning: truncated output") or "tokens truncated" in stdout:
+                    # Failed or cut down: the printed lines cannot be placed. File-level only.
+                    for o in from_shell_touches(cmd, effective_cwd(cmd, ecwd), set(), at):
+                        sess.add(o)
+                    continue
+                for o in observe_tool("Bash", {"command": cmd}, {"stdout": stdout}, "", ecwd, at):
+                    sess.add(o)
+    return sess, texts
+
+
+def read_transcript(path: str) -> tuple[Session, list[tuple[str, str]]]:
+    """Read a Claude Code transcript or a Codex rollout, whichever ``path`` is."""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(e, dict):
+                if e.get("type") in ("session_meta", "response_item", "turn_context") and "payload" in e:
+                    return read_codex_transcript(path)
+                break
+    return read_claude_transcript(path)
+
 def from_write(tool_input: dict[str, Any], at: str | None = None) -> Observation | None:
     """The agent authored this content, so it knows every line of it."""
     path, content = tool_input.get("file_path"), tool_input.get("content")
