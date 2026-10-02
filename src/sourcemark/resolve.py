@@ -13,6 +13,7 @@ says what happened: intact, shifted, moved, edited, or orphaned.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -21,7 +22,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable
 
 from .anchor import Mark
-from .locate import Match, locate
+from .locate import DISTINCTIVE_CHARS, Match, locate
 from .textnorm import fingerprint, line_offsets, normalize_newlines, offset_to_line
 
 STATUSES = ("intact", "shifted", "moved", "edited", "orphaned", "unverifiable")
@@ -30,6 +31,12 @@ STATUSES = ("intact", "shifted", "moved", "edited", "orphaned", "unverifiable")
 # unless the surrounding context also agrees.
 SHORT_QUOTE = 24
 MIN_CONTEXT_FOR_SHORT = 0.5
+# Lines that recur across files (imports, shebangs, lone closers): a unique copy of one
+# under the search roots still says nothing about where the citation went.
+_BOILERPLATE = re.compile(
+    r"^\s*(?:import\s|from\s+\S+\s+import\s|#include\b|#!|use\s|package\s|require\(|"
+    r"export\s+\*|[}\])]+[;,]?\s*$|(?:end|pass|else:?|return;?)\s*$)"
+)
 OTHER_FILE_DISTINCTIVE = 48
 MAX_SEARCH_FILES = 50
 
@@ -101,6 +108,11 @@ def _distinctive_lines(exact: str, n: int = 3) -> list[str]:
     lines = [ln for ln in lines if len(ln) >= 12]
     lines.sort(key=len, reverse=True)
     return lines[:n]
+
+
+def _boilerplate(exact: str) -> bool:
+    lines = [ln for ln in exact.split("\n") if ln.strip()]
+    return bool(lines) and all(_BOILERPLATE.match(ln) for ln in lines)
 
 
 def search_roots(roots: Iterable[str], exact: str, exclude: set[str]) -> list[str]:
@@ -179,7 +191,7 @@ def resolve(
             if repo_root.startswith(old):
                 repo_root = new + repo_root[len(old) :]
 
-    def attempt(path: str, allow_fuzzy: bool = True) -> bool:
+    def attempt(path: str, allow_fuzzy: bool = True, *, searched: bool = False, unique: bool = False) -> bool:
         doc = _read(path)
         res.candidates_checked += 1
         if doc is None:
@@ -197,10 +209,15 @@ def resolve(
             )
         if m is None:
             return False
-        if path != original and exact is not None:
-            # In ANOTHER file, only a distinctive quote, or one whose surroundings also
-            # moved with it, is the same citation. Boilerplate appears in many files.
-            distinctive = len(exact.strip()) >= OTHER_FILE_DISTINCTIVE or exact.count("\n") >= 2
+        if searched and exact is not None:
+            # A file found by searching (not a git rename) holds the same citation only when
+            # the quote is distinctive, the only copy under the roots, or its surroundings
+            # moved with it. Boilerplate appears in many files.
+            distinctive = (
+                len(exact.strip()) >= OTHER_FILE_DISTINCTIVE
+                or exact.count("\n") >= 2
+                or (unique and len(exact.strip()) >= DISTINCTIVE_CHARS and not _boilerplate(exact))
+            )
             worst = _ctx_worst(doc, m, mark)
             if not distinctive and worst < MIN_CONTEXT_FOR_SHORT:
                 res.notes.append(f"rejected non-distinctive hit in {path}")
@@ -243,8 +260,9 @@ def resolve(
     # Only an edited (fuzzy) match so far: an exact copy elsewhere is stronger evidence.
     if best is not None and exact is not None and search:
         excl = {os.path.abspath(p) for p in seen}
-        for c in search_roots(roots, exact, excl):
-            if attempt(c, allow_fuzzy=False):
+        found = search_roots(roots, exact, excl)
+        for c in found:
+            if attempt(c, allow_fuzzy=False, searched=True, unique=len(found) == 1):
                 res.notes.append("exact copy elsewhere preferred over fuzzy match in original")
                 return done()
     if best is not None:
@@ -258,7 +276,8 @@ def resolve(
         res.status = "unverifiable"
         res.notes.append("quote was redacted; only the original position can be verified")
     elif search:
-        for c in search_roots(roots, exact, {os.path.abspath(p) for p in seen}):
-            if attempt(c):
+        found = search_roots(roots, exact, {os.path.abspath(p) for p in seen})
+        for c in found:
+            if attempt(c, searched=True, unique=len(found) == 1):
                 break
     return done()

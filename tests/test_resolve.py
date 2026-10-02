@@ -139,6 +139,16 @@ class AnchorPrecisionTest(unittest.TestCase):
         self.write("a/c.py", "import os\nimport sys\n")
         self.assertEqual(resolve(m, roots=[self.dir]).status, "orphaned")
 
+    def test_unique_distinctive_line_moves_to_another_file(self):
+        body = "head\nretry_budget = compute_backoff(attempts, ceiling)\ntail\n"
+        p = self.write("a/src.py", body)
+        from sourcemark.anchor import TextSource
+        m = mark_lines(body, 2, 2, TextSource(path=p))
+        self.write("a/src.py", "head\ntail\n")
+        dest = self.write("b/pasted.md", "notes\nretry_budget = compute_backoff(attempts, ceiling)\nmore\n")
+        r = resolve(m, roots=[self.dir])
+        self.assertEqual((r.status, r.path, r.line_start), ("moved", dest, 2))
+
     def test_unicode_normalization_is_not_an_edit(self):
         import unicodedata
         body = "intro\nRésumé café naïve façade — the cited line\noutro\n"
@@ -160,6 +170,20 @@ class RedactionTest(unittest.TestCase):
         ]
         for c in cases:
             self.assertTrue(find_secrets(c), c)
+
+    def test_remaining_patterns(self):
+        import hashlib
+        cases = {
+            "cli_secret": "mysql --pass" + "word=Hunter2Hunter2 -h db",
+            "yaml_secret": "  pass" + "word: Hunter2Hunter2\n",
+            "npm_token": "npm_" + "a1B2" * 9,
+            "huggingface_token": "hf_" + "a1B2c3" * 6,
+            "sendgrid_key": "SG." + "a1B2c3d4" * 3 + "." + "e5F6g7h8" * 3,
+            "key_material": "Ab1" * 30,
+        }
+        for name, text in cases.items():
+            self.assertIn(name, find_secrets(text), text)
+        self.assertFalse(find_secrets(hashlib.sha256(b"x").hexdigest() * 2))
 
     def test_ordinary_code_is_not_redacted(self):
         for c in ['author = "Jonah"', "max_tokens: 4096", "password_hash = hash(password)", "export API_KEY=$FROM_VAULT"]:
