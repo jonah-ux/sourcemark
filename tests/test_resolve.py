@@ -443,3 +443,139 @@ class RedactionRound3Test(unittest.TestCase):
         with self.assertRaises(RuntimeError) as cm:
             PsqlRunner(dsn, psql=fake, timeout=0.5)("select 1")
         self.assertNotIn(self.PW, str(cm.exception))
+
+
+class RealHistoryRegressionTest(unittest.TestCase):
+    """Found by replaying real git history: unique short lines whose neighbours were edited."""
+
+    def test_unique_short_line_survives_an_edited_neighbour(self):
+        from sourcemark.anchor import TextSource
+
+        d = tempfile.mkdtemp(prefix="sm-hist-")
+        self.addCleanup(shutil.rmtree, d, True)
+        p = os.path.join(d, "fact.json")
+        before = '{\n  "id": "x",\n  "prompt": "You are checking a request against contract version 5.",\n  "public_facts": {\n    "a": 1\n  }\n}\n'
+        with open(p, "w") as fh:
+            fh.write(before)
+        m = mark_lines(before, 4, 4, TextSource(path=p))
+        with open(p, "w") as fh:
+            fh.write(before.replace("contract version 5.", "contract version 6 using only the excerpt below."))
+        r = resolve(m, search=False)
+        self.assertEqual((r.status, r.line_start), ("intact", 4))
+
+    def test_duplicated_short_line_still_needs_context(self):
+        from sourcemark.anchor import TextSource
+
+        before = "def a():\n    return None\n\ndef b():\n    return None\n"
+        d = tempfile.mkdtemp(prefix="sm-hist-")
+        self.addCleanup(shutil.rmtree, d, True)
+        p = os.path.join(d, "dup.py")
+        with open(p, "w") as fh:
+            fh.write(before)
+        m = mark_lines(before, 5, 5, TextSource(path=p))
+        with open(p, "w") as fh:
+            fh.write("def a():\n    return None\n\ndef b():\n    pass\n")
+        self.assertNotEqual(resolve(m, search=False).status, "shifted")
+
+
+class HistoryFollowTest(unittest.TestCase):
+    """Real history: a quoted line that occurs several times, with code inserted above it."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="sm-follow-")
+        self.addCleanup(shutil.rmtree, self.d, True)
+        git(self.d, "init", "-q", "-b", "main")
+        git(self.d, "config", "user.email", "t@example.com")
+        git(self.d, "config", "user.name", "t")
+        self.p = os.path.join(self.d, "t.py")
+
+    def commit(self, text):
+        with open(self.p, "w") as fh:
+            fh.write(text)
+        git(self.d, "add", "-A")
+        git(self.d, "commit", "-q", "-m", "c")
+
+    def block(self, tag, code):
+        return f"    def test_{tag}(self):\n        env = make()\n        env.pop('HOME', None)\n        self.assertEqual(run(env), {code})\n"
+
+    def test_identical_copies_follow_the_diff_not_the_old_line_number(self):
+        before = "class T:\n" + self.block("a", 1) + self.block("b", 2)
+        self.commit(before)
+        m = mark_lines(before, 8, 8, source_for(self.p))  # env.pop(...) inside test_b
+        self.assertTrue(m.source.get("git_blob"))
+        # A new test with the same lines lands between a and b: nearest-copy would pick it.
+        after = "class T:\n" + self.block("a", 1) + self.block("new", 0) + self.block("b", 2)
+        self.commit(after)
+        r = resolve(m, search=False)
+        self.assertEqual((r.status, r.line_start), ("shifted", 12))
+
+    def test_unchanged_boilerplate_line_is_not_orphaned(self):
+        before = "".join(f"try:\n    step({i})\nfinally:\n    close()\n" for i in range(4))
+        self.commit(before)
+        m = mark_lines(before, 11, 11, source_for(self.p))  # 3rd "finally:"
+        after = "import x\n\n" + before
+        self.commit(after)
+        r = resolve(m, search=False)
+        self.assertEqual((r.status, r.line_start), ("shifted", 13))
+
+    def test_an_edited_line_is_not_followed_to_an_identical_copy(self):
+        before = "".join(f"try:\n    step({i})\nfinally:\n    close()\n" for i in range(4))
+        self.commit(before)
+        m = mark_lines(before, 11, 11, source_for(self.p))  # step(2)'s finally
+        self.commit(before.replace("step(2)\nfinally:\n", "step(2)\nfinally:  # always\n"))
+        r = resolve(m, search=False)
+        self.assertNotIn(r.status, ("intact", "shifted"))
+
+    def test_edit_with_changed_surroundings_is_edited_not_orphaned(self):
+        before = (
+            "const a = 1;\n"
+            "// Collapsed by default only in focus mode\n"
+            "const [open, setOpen] = useState<boolean>(!focusedWorkflowLabel);\n"
+            "const b = 2;\n"
+        )
+        self.commit(before)
+        m = mark_lines(before, 3, 3, source_for(self.p))
+        after = "const a = 1;\nconst [open, setOpen] = useState<boolean>(true);\nconst c = 3;\n"
+        self.commit(after)
+        r = resolve(m, search=False)
+        self.assertEqual((r.status, r.line_start), ("edited", 2))
+
+    def test_unrelated_replacement_stays_orphaned(self):
+        before = "a = 1\nresult = compute_totals(rows, currency='USD')\nb = 2\n"
+        self.commit(before)
+        m = mark_lines(before, 2, 2, source_for(self.p))
+        self.commit("a = 1\nprint('done')\nb = 2\n")
+        self.assertEqual(resolve(m, search=False).status, "orphaned")
+
+    def test_redacted_quote_follows_a_move_by_hash(self):
+        # Assembled at runtime so no secret-shaped literal ever sits in the repository.
+        secret = "api" + "_key = '" + "abcd1234" + "efgh5678" + "ijkl'"
+        before = "a = 1\n" + secret + "\nb = 2\n"
+        self.commit(before)
+        m = mark_lines(before, 2, 2, source_for(self.p))
+        self.assertIsNone(m.quote["exact"])
+        self.commit("import os\nimport sys\n\n" + before)
+        r = resolve(m, search=False)
+        self.assertEqual((r.status, r.line_start), ("shifted", 5))
+
+    def test_redacted_duplicate_without_history_stays_unverifiable(self):
+        from sourcemark.anchor import TextSource
+
+        secret = "api" + "_key = '" + "abcd1234" + "efgh5678" + "ijkl'"
+        before = "a = 1\n" + secret + "\nb = 2\n"
+        p = os.path.join(self.d, "loose.py")  # not in git: no blob to disambiguate
+        with open(p, "w") as fh:
+            fh.write(before)
+        m = mark_lines(before, 2, 2, TextSource(path=p))
+        with open(p, "w") as fh:
+            fh.write("x = 0\ny = 0\n" + secret + "\n" + before)  # two copies, neither in place
+        self.assertEqual(resolve(m, search=False).status, "unverifiable")
+
+    def test_redacted_duplicate_is_picked_through_history(self):
+        secret = "api" + "_key = '" + "abcd1234" + "efgh5678" + "ijkl'"
+        before = "a = 1\n" + secret + "\nb = 2\n"
+        self.commit(before)
+        m = mark_lines(before, 2, 2, source_for(self.p))
+        self.commit("x = 0\n" + secret + "\ny = 0\n\n" + before)
+        r = resolve(m, search=False)
+        self.assertEqual((r.status, r.line_start), ("shifted", 6))
