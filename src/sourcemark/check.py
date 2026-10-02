@@ -15,6 +15,7 @@ Verdicts (per citation):
 * ``url_verified``   a link the session fetched or got back from a search
 * ``url_unsourced``  a link that never appeared in any fetch/search this session
 * ``delegated``      only a subagent read it; the citation is relayed, not first-hand
+* ``endpoint``       a local/private service address (localhost, LAN, CGNAT): not a source citation
 """
 
 from __future__ import annotations
@@ -119,6 +120,24 @@ def _match_path(cited: str, session: Session, lines: set[int] | None = None) -> 
     return None
 
 
+def _is_local_endpoint(url: str) -> bool:
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if host in ("localhost", "0.0.0.0") or host.endswith((".local", ".localhost", ".internal", ".lan")):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    cgnat = ipaddress.ip_network((0x64400000, 10))  # RFC 6598 shared address space (CGNAT / overlay VPNs)
+    return ip.is_loopback or ip.is_private or ip.is_link_local or (ip.version == 4 and ip in cgnat)
+
+
 def _bases(session: Session) -> list[str]:
     """Directories a relative citation may be relative to: cwds, then ancestors of touched files."""
     bases: list[str] = []
@@ -183,6 +202,10 @@ def check_citation(c: Citation, session: Session, *, now: bool = False) -> Citat
         out.verdict, out.detail = "unknown_token", "token lookup requires a mark ledger"
         return out
     if c.url:
+        if _is_local_endpoint(c.url):
+            out.path, out.verdict = c.url, "endpoint"
+            out.detail = "local or private address; an endpoint, not a cited source"
+            return out
         u = normalize_url(c.url)
         out.path = c.url
         def seen(urls: set[str]) -> bool:

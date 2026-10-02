@@ -118,16 +118,50 @@ def from_read(tool_input: dict[str, Any], result: Any, at: str | None = None) ->
 _GREP_LINE = re.compile(r"^(?P<path>[^:\n]+?):(?P<line>\d+)[:\-](?P<text>.*)$")
 
 
-def from_grep_text(stdout: str, cwd: str | None, tool: str, at: str | None = None) -> list[Observation]:
-    """``path:line:text`` hit lines (ripgrep/grep -n). Context lines use ``-`` and count too."""
+def _pathlike(p: str) -> bool:
+    p = p.strip()
+    if not p or p.isdigit() or "  " in p or any(ch in p for ch in "<>|*?\t"):
+        return False
+    return os.path.isfile(os.path.expanduser(p)) or bool(re.search(r"\.[A-Za-z0-9]{1,8}$", p)) or "/" in p
+
+
+_GREP_BARE = re.compile(r"^(?P<line>\d+)[:\-](?P<text>.*)$")
+
+
+def from_grep_text(
+    stdout: str,
+    cwd: str | None,
+    tool: str,
+    at: str | None = None,
+    single_file: str | None = None,
+    alt_base: str | None = None,
+) -> list[Observation]:
+    """``path:line:text`` hit lines (ripgrep/grep -n). Context lines use ``-`` and count too.
+
+    When the search targeted exactly one file, grep and ripgrep omit the file name and print
+    ``line:text``; those lines belong to ``single_file``.
+    """
     by_path: dict[str, Observation] = {}
     for raw in stdout.split("\n"):
+        m = None
+        if single_file:
+            b = _GREP_BARE.match(raw)
+            if b:
+                p = single_file
+                n, text = int(b.group("line")), b.group("text")
+                obs = by_path.setdefault(p, Observation(p, 0, [], tool, at, line_numbers=[]))
+                if n not in obs.line_numbers:  # type: ignore[operator]
+                    obs.line_numbers.append(n)  # type: ignore[union-attr]
+                    obs.lines.append(text)
+                continue
         m = _GREP_LINE.match(raw)
-        if not m:
-            continue
-        p = m.group("path")
-        if cwd and not os.path.isabs(p):
-            p = os.path.normpath(os.path.join(cwd, p))
+        if not m or not _pathlike(m.group("path")):
+            continue  # e.g. "26:1136:..." (text starting with digits) or `ls -l` rows, not file hits
+        p = m.group("path").strip()
+        if not os.path.isabs(p):
+            # Output paths may be relative to the search directory OR the session directory.
+            cands = [os.path.normpath(os.path.join(b, p)) for b in (cwd, alt_base) if b]
+            p = next((c for c in cands if os.path.isfile(c)), cands[0] if cands else p)
         obs = by_path.setdefault(p, Observation(p, 0, [], tool, at, line_numbers=[]))
         n = int(m.group("line"))
         if n not in obs.line_numbers:  # type: ignore[operator]
@@ -197,6 +231,22 @@ def from_shell_writes(command: str, cwd: str | None, at: str | None = None) -> l
     return out
 
 
+def _single_target(args: list[str], cwd: str | None) -> str | None:
+    """The one regular file a grep/rg invocation searched, if it searched exactly one."""
+    if any(a in ("-r", "-R", "--recursive") or (a.startswith("-") and not a.startswith("--") and "r" in a[1:] and a[1:].isalpha()) for a in args):
+        return None
+    operands = [a for a in args if not a.startswith("-")]
+    if "-e" in args or "--regexp" in args:
+        files = operands  # pattern supplied via -e; every operand is a path
+    else:
+        files = operands[1:]  # first operand is the pattern
+    if len(files) != 1:
+        return None
+    p = os.path.expanduser(files[0])
+    p = os.path.normpath(p if os.path.isabs(p) or not cwd else os.path.join(cwd, p))
+    return p if os.path.isfile(p) else None
+
+
 def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None) -> list[Observation]:
     """Recognize simple file-printing commands whose stdout is a known file slice."""
     out: list[Observation] = []
@@ -205,7 +255,11 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
         if "|" in seg:
             first = seg.split("|", 1)[0].strip()
             if first.startswith(("rg ", "grep ")):
-                return from_grep_text(stdout, cwd, "Bash")
+                try:
+                    fargs = shlex.split(first)[1:]
+                except ValueError:
+                    fargs = []
+                return from_grep_text(stdout, cwd, "Bash", at, single_file=_single_target(fargs, cwd))
             continue
         try:
             argv = shlex.split(seg)
@@ -215,8 +269,11 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
             continue
         cmd, args = os.path.basename(argv[0]), argv[1:]
         files = [a for a in args if not a.startswith("-") and not re.fullmatch(r"'?\d*,?\d*p'?", a)]
-        if cmd in ("rg", "grep") and ("-n" in args or cmd == "rg"):
-            return from_grep_text(stdout, cwd, "Bash", at)
+        numbered = "--line-number" in args or any(
+            a.startswith("-") and not a.startswith("--") and a[1:].isalpha() and "n" in a[1:] for a in args
+        )
+        if cmd in ("rg", "grep") and (numbered or cmd == "rg"):
+            return from_grep_text(stdout, cwd, "Bash", at, single_file=_single_target(args, cwd))
         if cmd not in ("cat", "sed", "head", "tail", "nl") or len(files) != 1:
             continue
         path = files[0] if os.path.isabs(files[0]) or not cwd else os.path.join(cwd, files[0])
@@ -405,7 +462,14 @@ def observe_tool(
     elif name == "Grep":
         text = structured.get("content") if isinstance(structured, dict) else None
         text = text if isinstance(text, str) else _text_of(content)
-        yield from from_grep_text(text, tool_input.get("path") or cwd, "Grep", at)
+        target = tool_input.get("path")
+        single = None
+        if target:
+            tp = os.path.expanduser(target)
+            tp = tp if os.path.isabs(tp) or not cwd else os.path.join(cwd, tp)
+            single = os.path.normpath(tp) if os.path.isfile(tp) else None
+        base = os.path.dirname(single) if single else (target or cwd)
+        yield from from_grep_text(text, base, "Grep", at, single_file=single, alt_base=cwd)
     elif name in ("Bash", "Shell"):
         stdout = structured.get("stdout") if isinstance(structured, dict) else None
         stdout = stdout if isinstance(stdout, str) else _text_of(content)
