@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sourcemark"
-version = "0.2.0"
+version = "0.3.0"
 description = "Citations that survive moves and edits: anchor quotes, file lines, and database values, then prove an agent's claims against what it actually read"
 readme = "README.md"
 requires-python = ">=3.11"

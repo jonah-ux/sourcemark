@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.0 — 2026-10-02
+
+### Codex rollouts (#65, #66)
+
+`sourcemark check` reads Codex rollouts (`~/.codex/sessions/.../rollout-*.jsonl`) as well as Claude Code transcripts; the format is detected. Codex tools run from JavaScript cells, so cells are read conservatively:
+
+- A literal one-call cell is read like a shell command.
+- Multi-command cells credit only self-describing lines.
+- Cut outputs keep only lines that carry their own numbers.
+- Failed or computed commands give file-level evidence only.
+
+On 2,973 real rollouts with 47,394 real citations: 0.00% false flags, every injected near-miss caught.
+
+### Self-numbered evidence
+
+`nl -ba F | sed -n 'A,Bp'` and `cat -n F | head` lines carry their own line numbers, so they now count as line evidence in Claude Code sessions too. Several slices are split only where the numbering restarts, one restart per command.
+
 ## 0.2.0 — 2026-10-02
 
 Learned from failures on much larger real benchmarks: 4,691 real git-history edits from 4 repositories, and all 3,398 local agent sessions with 8,000+ injected near-miss citations. Every fix has a regression test built from the real failing shape.
