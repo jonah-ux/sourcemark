@@ -680,7 +680,12 @@ def read_claude_transcript(path: str, subagents: bool = True) -> tuple[Session, 
                     tur = e.get("toolUseResult")
                     # Any URL that came back from ANY tool (gh pr create, curl, WebFetch, MCP...) is sourced;
                     # inputs count only for web tools (a fetched URL), not for arbitrary commands.
-                    if not is_error_result(tur, c.get("content"), bool(c.get("is_error"))):
+                    if name in _AUTHORING_TOOLS:
+                        pass  # the agent's own writing echoed back is not a source for its links
+                    elif name in _DELEGATING_TOOLS:
+                        # A subagent's report: the orchestrator did not fetch these itself.
+                        sess.delegated_urls |= urls_in(tur if tur is not None else c.get("content"))
+                    elif not is_error_result(tur, c.get("content"), bool(c.get("is_error"))):
                         # A URL inside an error ("fetch failed: https://...") was not obtained.
                         sess.urls |= urls_in(tur if tur is not None else c.get("content"))
                         if _is_web_tool(name):
@@ -706,6 +711,10 @@ def read_claude_transcript(path: str, subagents: bool = True) -> tuple[Session, 
                     sess.observations.append(o)
                 sess.delegated_urls |= sub.urls - sess.urls
     return sess, texts
+
+
+_AUTHORING_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+_DELEGATING_TOOLS = {"Task", "Agent"}
 
 
 def _is_web_tool(name: str) -> bool:
@@ -756,11 +765,14 @@ def from_edit(tool_input: dict[str, Any], structured: Any, at: str | None = None
     return Observation(path, 0, texts, "Edit", at, line_numbers=nums)
 
 
-_URL = re.compile(r"https?://[^\s\"'<>()\[\]{}|\\^`]+")
+# Balanced parentheses are part of a URL: /wiki/Python_(programming_language)
+_URL = re.compile(r"https?://(?:[^\s\"'<>()\[\]{}|\\^`]|\([^\s\"'<>()]*\))+")
 
 
 def normalize_url(url: str) -> str:
-    url = url.strip().rstrip(".,;:!?)]}>'\"*_`")
+    url = url.strip().rstrip(".,;:!?]}>'\"*`")
+    while url.endswith(")") and url.count(")") > url.count("("):
+        url = url[:-1].rstrip(".,;:!?]}>'\"*`")  # "(see https://x/a)" but not ".../Python_(language)"
     url = url.split("#", 1)[0]
     if "?" in url:
         base, q = url.split("?", 1)
