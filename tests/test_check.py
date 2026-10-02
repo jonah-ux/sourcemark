@@ -190,3 +190,44 @@ class DelegatedEvidenceTest(unittest.TestCase):
             self.assertEqual(check_text(texts2[-1][1], sess2).checks[0].verdict, "unread_file")
         finally:
             shutil.rmtree(d, ignore_errors=True)
+
+
+class SingleFileGrepTest(unittest.TestCase):
+    """grep/rg on ONE file omit the file name: `N:text`, not `path:N:text`."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="sm-grep-")
+        self.f = os.path.join(self.d, "inject.py")
+        with open(self.f, "w") as fh:
+            fh.write("\n".join(f"line {i}" for i in range(1, 2001)) + "\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_bash_grep_single_file(self):
+        obs = from_shell(f"wc -l inject.py && grep -n 'budget' inject.py", "2000 inject.py\n1079:    budget = 1\n1335:    render()\n", self.d)
+        self.assertEqual(obs[0].path, self.f)
+        self.assertEqual(obs[0].line_numbers, [1079, 1335])
+
+    def test_grep_tool_single_file(self):
+        from sourcemark.observe import observe_tool
+        res = {"mode": "content", "content": "1079:    budget = 1\n1335:    render()", "numLines": 2}
+        sess = Session(cwd=self.d)
+        for o in observe_tool("Grep", {"pattern": "budget", "path": self.f, "-n": True}, res, "", self.d):
+            sess.add(o)
+        self.assertEqual(check_text("see inject.py:1335", sess).checks[0].verdict, "verified")
+        self.assertEqual(check_text("see inject.py:1336", sess).checks[0].verdict, "unread_lines")
+
+    def test_recursive_grep_is_not_single(self):
+        obs = from_shell("grep -rn 'x' .", "a.py:3:x\n", self.d)
+        self.assertEqual(obs[0].path, os.path.join(self.d, "a.py"))
+
+
+class EndpointTest(unittest.TestCase):
+    def test_local_addresses_are_endpoints(self):
+        sess = Session()
+        import ipaddress
+        shared = str(ipaddress.ip_address(0x64500102))  # an address inside RFC 6598 shared space
+        for u in ("http://127.0.0.1:8080/api", "http://localhost:3000", "http://10.0.0.5/x", f"http://{shared}:11434", "http://printer.local/"):
+            self.assertEqual(check_text(f"server at {u}", sess).checks[0].verdict, "endpoint", u)
+        self.assertEqual(check_text("see https://example.com/docs", sess).checks[0].verdict, "url_unsourced")
