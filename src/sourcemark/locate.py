@@ -130,7 +130,12 @@ def locate(
         best = max(occ, key=rank)
         ctx = _context_score(doc, best, best + len(exact), prefix, suffix)
         worst = _context_score(doc, best, best + len(exact), prefix, suffix, worst=True)
-        distinctive = len(occ) == 1 and len(exact.strip()) >= DISTINCTIVE_CHARS and unique_when_marked
+        distinctive = len(occ) == 1 and unique_when_marked and (
+            len(exact.strip()) >= DISTINCTIVE_CHARS
+            # In the cited file itself, a line that was the only copy when cited and still is the
+            # only copy is the same line, however short, even if its neighbours were edited.
+            or (hint_start is not None and _meaningful(exact))
+        )
         # A short or repeated line found away from its context is usually a different
         # occurrence (e.g. `return None` in another function), not the cited one.
         if not (prefix or suffix) or worst >= EXACT_CONTEXT_MIN or distinctive:
@@ -144,7 +149,9 @@ def locate(
         s_, e_, n_hits = loose
         if not whole or _on_line_bounds(doc, s_, e_):
             worst = _context_score(doc, s_, e_, prefix, suffix, worst=True)
-            distinctive = n_hits == 1 and len(exact.strip()) >= DISTINCTIVE_CHARS and unique_when_marked
+            distinctive = n_hits == 1 and unique_when_marked and (
+                len(exact.strip()) >= DISTINCTIVE_CHARS or (hint_start is not None and _meaningful(exact))
+            )
             if not (prefix or suffix) or worst >= EXACT_CONTEXT_MIN or distinctive:
                 return Match(s_, e_, 1.0, "loose", _context_score(doc, s_, e_, prefix, suffix))
 
@@ -210,6 +217,11 @@ def _is_a_neighbour(doc: str, m: Match, exact: str, prefix: str, suffix: str) ->
         if looks_like_neighbour and not neighbour_still_there:
             return True
     return False
+
+
+def _meaningful(exact: str) -> bool:
+    """Enough content to identify a line on its own: 4+ letters/digits ("## Notes" yes, "});" no)."""
+    return sum(ch.isalnum() for ch in exact) >= 4
 
 
 def _whole_lines(prefix: str, suffix: str) -> bool:
