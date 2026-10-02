@@ -205,7 +205,12 @@ _SED = re.compile(r"^sed$")
 
 
 _HEREDOC = re.compile(
-    r"(?:cat|tee)\s+(?:-a\s+)?>?\s*(?P<path>[^\s<>|;&]+)\s*<<-?\s*['\"]?(?P<tag>\w+)['\"]?[^\n]*\n(?P<body>.*?)\n\s*(?P=tag)\b",
+    r"(?P<cmd>cat|tee)\s+(?P<append>-a\s+|>>\s*)?>?\s*(?P<path>[^\s<>|;&]+)\s*<<-?\s*['\"]?(?P<tag>\w+)['\"]?[^\n]*\n(?P<body>.*?)\n\s*(?P=tag)\b",
+    re.S,
+)
+# The other common order: cat <<'EOF' > path
+_HEREDOC_FIRST = re.compile(
+    r"cat\s+<<-?\s*['\"]?(?P<tag>\w+)['\"]?\s*(?P<op>>>?)\s*(?P<path>[^\s<>|;&]+)[^\n]*\n(?P<body>.*?)\n\s*(?P=tag)\b",
     re.S,
 )
 _REDIRECT = re.compile(r"(?:^|[\s;&|])(?:>|>>|tee\s+(?:-a\s+)?)\s*(?P<path>[~/.\w][^\s<>|;&]*)")
@@ -311,10 +316,18 @@ def from_shell_writes(command: str, cwd: str | None, at: str | None = None) -> l
         p = os.path.expanduser(p.strip("'\""))
         return os.path.normpath(p if os.path.isabs(p) or not cwd else os.path.join(cwd, p))
 
-    for m in _HEREDOC.finditer(command):
-        p = absolute(m.group("path"))
+    heredocs = [(m.group("path"), bool(m.group("append")), m.group("body")) for m in _HEREDOC.finditer(command)]
+    heredocs += [(m.group("path"), m.group("op") == ">>", m.group("body")) for m in _HEREDOC_FIRST.finditer(command)]
+    for raw, append, body in heredocs:
+        p = absolute(raw)
+        if p in seen:
+            continue
         seen.add(p)
-        out.append(Observation(p, 1, m.group("body").split("\n"), "Bash-write", at))
+        if append:
+            # Appended after an unknown number of existing lines: the body is not lines 1..N.
+            out.append(Observation(p, 0, [""], "Bash-append", at, line_numbers=[]))
+        else:
+            out.append(Observation(p, 1, body.split("\n"), "Bash-write", at))
     for m in _REDIRECT.finditer(command):
         raw = m.group("path")
         if raw.startswith(("/dev/", "&")) or raw in ("-",):
@@ -371,9 +384,48 @@ def gh_refs(command: str) -> set[str]:
     return urls
 
 
-def _grep_targets(args: list[str], cwd: str | None) -> list[str] | None:
-    operands = [a for a in args if not a.startswith("-")]
-    paths = operands if ("-e" in args or "--regexp" in args) else operands[1:]
+# Options whose value is the next argument (so it is neither the pattern nor a path).
+_GREP_VALUE_SHORT = {"grep": set("ABCmefdD"), "rg": set("ABCmefgtTMjEd")}
+_GREP_VALUE_LONG = {
+    "--glob", "--iglob", "--type", "--type-not", "--max-count", "--context", "--after-context",
+    "--before-context", "--regexp", "--file", "--max-depth", "--max-columns", "--threads",
+    "--include", "--exclude", "--exclude-dir", "--color", "--colour", "--sort", "--sortr",
+    "--encoding", "--type-add", "--replace", "--pre", "--pre-glob",
+}
+
+
+def _grep_operands(args: list[str], tool: str = "grep") -> tuple[bool, list[str]]:
+    """(pattern given via -e/-f, positional operands), skipping option values."""
+    short = _GREP_VALUE_SHORT.get(tool, _GREP_VALUE_SHORT["grep"])
+    via_e, ops, skip = False, [], False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a == "--":
+            continue
+        if a.startswith("--"):
+            name = a.split("=", 1)[0]
+            if name in ("--regexp", "--file"):
+                via_e = True
+            if name in _GREP_VALUE_LONG and "=" not in a:
+                skip = True
+            continue
+        if a.startswith("-") and len(a) > 1:
+            letters = a[1:]
+            if "e" in letters or "f" in letters:
+                via_e = True
+            # "-C" / "-nC" take the next argument; "-C2" carries its value.
+            if letters[-1] in short and letters.isalpha():
+                skip = True
+            continue
+        ops.append(a)
+    return via_e, ops
+
+
+def _grep_targets(args: list[str], cwd: str | None, tool: str = "grep") -> list[str] | None:
+    via_e, operands = _grep_operands(args, tool)
+    paths = operands if via_e else operands[1:]
     out = []
     for t in paths or ([cwd] if cwd else []):
         t = os.path.expanduser(t)
@@ -382,20 +434,78 @@ def _grep_targets(args: list[str], cwd: str | None) -> list[str] | None:
     return out or None
 
 
-def _single_target(args: list[str], cwd: str | None) -> str | None:
+def _single_target(args: list[str], cwd: str | None, tool: str = "grep") -> str | None:
     """The one regular file a grep/rg invocation searched, if it searched exactly one."""
     if any(a in ("-r", "-R", "--recursive") or (a.startswith("-") and not a.startswith("--") and "r" in a[1:] and a[1:].isalpha()) for a in args):
         return None
-    operands = [a for a in args if not a.startswith("-")]
-    if "-e" in args or "--regexp" in args:
-        files = operands  # pattern supplied via -e; every operand is a path
-    else:
-        files = operands[1:]  # first operand is the pattern
+    via_e, operands = _grep_operands(args, tool)
+    files = operands if via_e else operands[1:]  # without -e, the first operand is the pattern
     if len(files) != 1:
         return None
     p = os.path.expanduser(files[0])
     p = os.path.normpath(p if os.path.isabs(p) or not cwd else os.path.join(cwd, p))
     return p if _isfile(p) else None
+
+
+def _numbered(args: list[str]) -> bool:
+    """grep/rg print line numbers only when asked (rg numbers by default only on a terminal)."""
+    if "--no-line-number" in args or any(a.startswith("-") and not a.startswith("--") and "N" in a[1:] and a[1:].isalpha() for a in args):
+        return False
+    return "--line-number" in args or "--vimgrep" in args or any(
+        a.startswith("-") and not a.startswith("--") and a[1:].isalpha() and "n" in a[1:] for a in args
+    )
+
+
+def _grep_evidence(argv: list[str], stdout: str, cwd: str | None, at: str | None, *, alone: bool) -> list[Observation] | None:
+    """Line evidence from a grep/rg run, or None when its output cannot be read as numbered hits:
+    no -n, or other commands printed into the same stdout (a linter's ``f.py:97:5:`` looks alike)."""
+    if not argv:
+        return None
+    tool, args = os.path.basename(argv[0]), argv[1:]
+    if not _numbered(args):
+        return None
+    obs = from_grep_text(stdout, cwd, "Bash", at, single_file=_single_target(args, cwd, tool), roots=_grep_targets(args, cwd, tool))
+    if alone:
+        return obs
+    # Other commands printed into the same stdout: keep only lines that match the pattern.
+    match = _grep_matcher(args, tool)
+    if match is None:
+        return None
+    kept = []
+    for o in obs:
+        if o.line_numbers is None:
+            continue
+        pairs = [(n, t) for n, t in zip(o.line_numbers, o.lines) if match(t)]
+        if pairs:
+            kept.append(Observation(o.path, pairs[0][0], [t for _, t in pairs], o.tool, o.at, line_numbers=[n for n, _ in pairs]))
+    return kept
+
+
+def _grep_matcher(args: list[str], tool: str):
+    """A predicate for 'this text is a hit of this grep', or None if the pattern is unknown."""
+    via_e, ops = _grep_operands(args, tool)
+    pat = None
+    for i, a in enumerate(args):
+        if a in ("-e", "--regexp") and i + 1 < len(args):
+            pat = args[i + 1]
+            break
+        if a.startswith("--regexp="):
+            pat = a.split("=", 1)[1]
+            break
+    if pat is None and not via_e and ops:
+        pat = ops[0]
+    if not pat:
+        return None
+    flags = " ".join(a for a in args if a.startswith("-") and not a.startswith("--"))
+    ci = "i" in flags or "--ignore-case" in args
+    if "F" in flags or "--fixed-strings" in args:
+        needle = pat.lower() if ci else pat
+        return lambda t: needle in (t.lower() if ci else t)
+    try:
+        rx = re.compile(pat.replace("\\|", "|"), re.I if ci else 0)
+    except re.error:
+        return lambda t: pat in t
+    return lambda t: rx.search(t) is not None
 
 
 # Segments that print nothing: they do not share the stdout with the command that read a file.
@@ -406,16 +516,19 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
     """Recognize simple file-printing commands whose stdout is a known file slice."""
     out: list[Observation] = []
     owner: dict[int, str] = {}  # index in ``out`` -> the segment that printed it
+    loud = [x for x in re.split(r"\s*(?:&&|;|\|\|)\s*", command) if x.strip() and not _SILENT.match(x.strip())]
     for segment in re.split(r"\s*(?:&&|;|\|\|)\s*", command):
         seg = segment.strip()
         if "|" in seg:
             first = seg.split("|", 1)[0].strip()
             if first.startswith(("rg ", "grep ")):
                 try:
-                    fargs = shlex.split(first)[1:]
+                    fargv = shlex.split(first)
                 except ValueError:
-                    fargs = []
-                return from_grep_text(stdout, cwd, "Bash", at, single_file=_single_target(fargs, cwd), roots=_grep_targets(fargs, cwd))
+                    fargv = []
+                grep = _grep_evidence(fargv, stdout, cwd, at, alone=len(loud) == 1)
+                if grep is not None:
+                    return grep
             continue
         try:
             argv = shlex.split(seg)
@@ -430,11 +543,11 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
         files = [a for a in args if not a.startswith("-") and not re.fullmatch(r"'?\d*,?\d*p'?", a)]
         if cmd == "cat" and any(a.startswith("-") for a in args):
             continue  # cat -s/-n/-v... changes the lines; do not attribute line numbers
-        numbered = "--line-number" in args or any(
-            a.startswith("-") and not a.startswith("--") and a[1:].isalpha() and "n" in a[1:] for a in args
-        )
-        if cmd in ("rg", "grep") and (numbered or cmd == "rg"):
-            return from_grep_text(stdout, cwd, "Bash", at, single_file=_single_target(args, cwd), roots=_grep_targets(args, cwd))
+        if cmd in ("rg", "grep"):
+            grep = _grep_evidence(argv, stdout, cwd, at, alone=len(loud) == 1)
+            if grep is not None:
+                return grep
+            continue
         if cmd not in ("cat", "sed", "head", "tail", "nl") or len(files) != 1:
             continue
         path = files[0] if os.path.isabs(files[0]) or not cwd else os.path.join(cwd, files[0])
@@ -444,10 +557,12 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
             lines = lines[:-1]
         start = 1
         if cmd == "sed":
-            m = re.search(r"(\d+),(\d+)p", seg)
-            if not m or "-n" not in args:
+            # Exactly one "N,Mp" / "Np" script: several ranges print back to back into one
+            # stdout, so the second range's text would land on the first range's line numbers.
+            scripts = [a for a in args if re.fullmatch(r"\d+(?:,\d+)?p", a)]
+            if "-n" not in args or len(scripts) != 1 or args.count("-e") > 1:
                 continue
-            start = int(m.group(1))
+            start = int(scripts[0].split(",")[0].rstrip("p"))
         elif cmd == "tail":
             continue  # start line unknown without the file length; skip rather than guess
         elif cmd == "nl":
@@ -711,6 +826,7 @@ def observe_tool(
         if obs:
             yield obs
     elif name == "Grep":
+        unnumbered = tool_input.get("output_mode") == "content" and tool_input.get("-n") is False
         text = structured.get("content") if isinstance(structured, dict) else None
         text = text if isinstance(text, str) else _text_of(content)
         target = tool_input.get("path")
@@ -724,6 +840,11 @@ def observe_tool(
         if root and not os.path.isabs(root) and cwd:
             root = os.path.join(cwd, root)
         roots = [_realpath(root)] if root else None
+        if unnumbered:
+            # Without line numbers a leading "2024-01-15 ..." is text, not line 2024.
+            if single and text:
+                yield Observation(single, 0, [], "Grep", at, line_numbers=[])
+            return
         yield from from_grep_text(text, base, "Grep", at, single_file=single, alt_base=cwd, roots=roots)
     elif name in ("Bash", "Shell"):
         stdout = structured.get("stdout") if isinstance(structured, dict) else None
