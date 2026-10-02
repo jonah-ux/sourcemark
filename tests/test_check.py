@@ -935,3 +935,63 @@ class RealSessionLearning2Test(unittest.TestCase):
         from sourcemark.observe import _split_unquoted
         self.assertEqual(_split_unquoted("echo don't && cat f"), ["echo don't", "cat f"])
         self.assertEqual(_split_unquoted('grep -n "a && b" f && cat g'), ['grep -n "a && b" f', "cat g"])
+
+
+class CodexRolloutTest(unittest.TestCase):
+    """Codex runs tools from JS cells; only literal one-call cells are read as command output."""
+
+    def rollout(self, d, items):
+        p = os.path.join(d, "rollout-test.jsonl")
+        rows = [{"type": "session_meta", "payload": {"id": "t"}}, {"type": "turn_context", "payload": {"cwd": d}}]
+        for i, (code, out) in enumerate(items):
+            cid = f"call_{i}"
+            rows.append({"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "call_id": cid, "input": code}})
+            rows.append({"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": cid,
+                         "output": [{"type": "input_text", "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"}, {"type": "input_text", "text": out}]}})
+        rows.append({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]}})
+        with open(p, "w") as fh:
+            fh.write("\n".join(json.dumps(r) for r in rows) + "\n")
+        return p
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="sm-codex-")
+        self.addCleanup(shutil.rmtree, self.d, True)
+        with open(os.path.join(self.d, "a.py"), "w") as fh:
+            fh.write("\n".join(f"x{i} = {i}" for i in range(1, 100)) + "\n")
+
+    def test_literal_cell_is_read_and_checked(self):
+        from sourcemark.observe import read_transcript
+
+        body = "\n".join(f"x{i} = {i}" for i in range(10, 21)) + "\n"
+        p = self.rollout(self.d, [('const r = await tools.exec_command({cmd: "sed -n \'10,20p\' a.py", workdir: "%s"}); text(r.output);' % self.d, body)])
+        sess, texts = read_transcript(p)
+        self.assertEqual(texts[-1][1], "done")
+        self.assertEqual(check_text("a.py:15", sess).checks[0].verdict, "verified")
+        self.assertEqual(check_text("a.py:21", sess).checks[0].verdict, "unread_lines")
+
+    def test_json_form_and_failures(self):
+        from sourcemark.observe import read_transcript
+
+        ok = json.dumps({"exit_code": 0, "output": "3:x3 = 3\n"})
+        bad = json.dumps({"exit_code": 2, "output": "40:x40 = 40\n"})
+        cut = "Warning: truncated output (original token count: 9000)\nTotal output lines: 99\n\n50:x50 = 50\n"
+        p = self.rollout(self.d, [
+            ('text(await tools.exec_command({cmd:"grep -n \'x3 \' a.py"}));', ok),
+            ('text(await tools.exec_command({cmd:"grep -n \'x40 \' a.py"}));', bad),
+            ('const r=await tools.exec_command({cmd:"grep -n \'x50 \' a.py"});text(r.output);', cut),
+            ('const r=await tools.exec_command({cmd:"grep -n x60 " + f});text(r.output);', "60:x60 = 60\n"),
+        ])
+        sess, _ = read_transcript(p)
+        self.assertEqual(check_text("a.py:3", sess).checks[0].verdict, "verified")
+        for n in (40, 50, 60):  # failed, truncated, computed command: no line credit
+            self.assertNotEqual(check_text(f"a.py:{n}", sess).checks[0].verdict, "verified")
+
+    def test_urls_typed_into_a_cell_are_not_sourced(self):
+        from sourcemark.observe import read_transcript
+
+        typed = "https://example.org/" + "typed"
+        got = "https://example.org/" + "fetched"
+        p = self.rollout(self.d, [(f'const r=await tools.exec_command({{cmd:"echo {typed}; curl -s x"}});text(r.output);', f"{typed}\n{got}\n")])
+        sess, _ = read_transcript(p)
+        self.assertIn(got, " ".join(sess.urls))
+        self.assertNotIn(typed, " ".join(sess.urls))
