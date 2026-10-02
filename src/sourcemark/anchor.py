@@ -21,7 +21,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from .redact import find_secrets
+from .redact import find_secret_spans
 from .textnorm import (
     fingerprint,
     line_offsets,
@@ -102,7 +102,13 @@ def mark_text(
     line_start = offset_to_line(offsets, start)
     line_end = offset_to_line(offsets, max(start, end - 1))
 
-    secrets = find_secrets(prefix + exact + suffix)
+    # Scan a WIDER window than we store: a secret cut off at the context edge would no
+    # longer match its own pattern, yet its stored fragment would still leak.
+    lo, hi = max(0, start - context), min(len(doc), end + context)
+    wide_lo, wide_hi = max(0, lo - 200), min(len(doc), hi + 200)
+    secrets = sorted(
+        {name for name, a, b in find_secret_spans(doc[wide_lo:wide_hi]) if a + wide_lo < hi and b + wide_lo > lo}
+    )
     quote = {"exact": exact, "prefix": prefix, "suffix": suffix}
     if secrets:
         # Never persist secret-shaped text; keep only what is needed to verify.
