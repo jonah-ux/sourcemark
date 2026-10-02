@@ -135,7 +135,12 @@ class ShellTest(unittest.TestCase):
         self.assertEqual((obs[0].path, obs[0].line_start, obs[0].lines), ("/w/a.txt", 5, ["five", "six", "seven"]))
 
     def test_multi_print_is_file_level_only(self):
+        obs = from_shell("cat a.txt; cat b.txt", "x\ny\n", "/w")
+        self.assertTrue(all(o.tool == "Bash-touch" for o in obs))
+        # An unquoted marker printed exactly once splits the output; one printed twice does not.
         obs = from_shell("cat a.txt; echo ===; cat b.txt", "x\n===\ny\n", "/w")
+        self.assertEqual(sorted((o.path, tuple(o.lines)) for o in obs), [("/w/a.txt", ("x",)), ("/w/b.txt", ("y",))])
+        obs = from_shell("cat a.txt; echo ===; cat b.txt", "x\n===\n===\ny\n", "/w")
         self.assertTrue(all(o.tool == "Bash-touch" for o in obs))
 
     def test_heredoc_write(self):
@@ -798,3 +803,135 @@ class GhListRefsTest(unittest.TestCase):
 
         cmd = "gh pr list --repo acme/app; gh pr list --repo acme/web"
         self.assertEqual(gh_refs(cmd, "12 OPEN title\n"), set())
+
+
+class ElidedSourceUrlTest(unittest.TestCase):
+    def test_elided_url_in_tool_output_is_not_a_source(self):
+        from sourcemark.observe import urls_in
+
+        self.assertEqual(urls_in("shared https://loom.com/share/ad4\u2026 and https://loom.com/share/full123"), {"https://loom.com/share/full123"})
+
+
+class RealSessionLearningTest(unittest.TestCase):
+    """Failures learned from the full-scale run over every local session."""
+
+    def test_unquoted_echo_markers_split_sed_ranges(self):
+        out = from_shell("sed -n 1,3p /r/z.ts && echo ... && sed -n 200,202p /r/z.ts",
+                         "a\nb\nc\n...\nx200\nx201\nx202\n", "/w")
+        got = sorted((o.line_start, tuple(o.lines)) for o in out)
+        self.assertEqual(got, [(1, ("a", "b", "c")), (200, ("x200", "x201", "x202"))])
+        out = from_shell("sed -n 320,321p /r/z.ts && echo ------- && sed -n 520,521p /r/z.ts", "p\nq\n-------\nr\ns\n", "/w")
+        self.assertEqual(sorted(o.line_start for o in out), [320, 520])
+
+    def test_split_that_overfills_a_sed_range_is_rejected(self):
+        out = from_shell("sed -n 1,2p /r/z.ts && echo --- && sed -n 9,9p /r/z.ts", "a\nb\nextra\n---\nz\n", "/w")
+        self.assertTrue(all(o.line_start == 0 for o in out))
+
+    def test_github_compare_urls_are_not_elided(self):
+        u = "https://github.com/acme/app/compare/main...feature-x"
+        self.assertEqual([c.url for c in extract(f"see [diff]({u}) and {u}")], [u, u])
+        from sourcemark.observe import urls_in
+
+        self.assertEqual(urls_in(f"opened {u}"), {u})
+        self.assertEqual(extract("cut https://github.com/acme/... here"), [])
+
+
+class RealSessionLearning2Test(unittest.TestCase):
+    def test_git_grep_lines_are_attributed(self):
+        d = tempfile.mkdtemp(prefix="sm-gg-")
+        self.addCleanup(shutil.rmtree, d, True)
+        os.makedirs(os.path.join(d, "lib"))
+        with open(os.path.join(d, "lib", "z.ts"), "w") as fh:
+            fh.write("\n".join(f"l{i}" for i in range(1, 1000)) + "\n")
+        obs = from_shell('git grep -n -E "l932|l933" -- lib/z.ts', "lib/z.ts:932:l932\nlib/z.ts:933:l933\n", d)
+        self.assertEqual(sorted(n for o in obs for n in (o.line_numbers or [])), [932, 933])
+
+    def test_sed_range_mixed_with_other_output_credits_numbers_not_text(self):
+        d = tempfile.mkdtemp(prefix="sm-sr-")
+        self.addCleanup(shutil.rmtree, d, True)
+        f = os.path.join(d, "r.ts")
+        with open(f, "w") as fh:
+            fh.write("\n".join(f"line {i}" for i in range(1, 400)) + "\n")
+        s = Session(cwd=d)
+        for o in from_shell("sed -n 270,330p r.ts; grep -n zzz other.ts", "line 270\n...\nother.ts:5:zzz\n", d):
+            s.add(o)
+        self.assertEqual(check_text("see r.ts:313-325", s).checks[0].verdict, "verified")
+        self.assertEqual(check_text("see r.ts:331", s).checks[0].verdict, "unread_lines")
+
+    def test_separator_inside_a_quoted_pattern_does_not_split_the_command(self):
+        # Real session: `git grep -n -E "batch.length === 0|stopOnShortPage &&|..." -- f | cut ...; git grep ...`
+        d = tempfile.mkdtemp(prefix="sm-qs-")
+        self.addCleanup(shutil.rmtree, d, True)
+        os.makedirs(os.path.join(d, "lib"))
+        for name in ("z.ts", "c.ts"):
+            with open(os.path.join(d, "lib", name), "w") as fh:
+                fh.write("\n".join(f"l{i}" for i in range(1, 1000)) + "\n")
+        cmd = 'git grep -n -E "l932 && x|l933" -- lib/z.ts | cut -c1-150; git grep -n "l4" -- lib/c.ts'
+        obs = from_shell(cmd, "lib/z.ts:932:l932 && x\nlib/z.ts:933:l933\nlib/c.ts:4:l4\n", d)
+        got = {(os.path.basename(o.path), n) for o in obs for n in (o.line_numbers or [])}
+        self.assertEqual(got, {("z.ts", 932), ("z.ts", 933), ("c.ts", 4)})
+
+    def test_multi_line_script_lines_are_commands(self):
+        from sourcemark.observe import observe_tool
+
+        # Real sessions: `cd D` / `echo "=== x ==="` / `grep -n ... f` on separate lines, not joined by &&.
+        d = tempfile.mkdtemp(prefix="sm-ml-")
+        self.addCleanup(shutil.rmtree, d, True)
+        with open(os.path.join(d, "f.py"), "w") as fh:
+            fh.write("\n".join(f"v{i} = {i}" for i in range(1, 50)) + "\n")
+        cmd = f'cd {d}\necho "=== where v12 ==="\ngrep -n "v12 =" f.py'
+        s = Session(cwd="/")
+        for o in observe_tool("Bash", {"command": cmd}, {"stdout": "=== where v12 ===\n12:v12 = 12\n"}, "", "/"):
+            s.add(o)
+        self.assertEqual(check_text("f.py:12", s).checks[0].verdict, "verified")
+        self.assertEqual(check_text("f.py:13", s).checks[0].verdict, "unread_lines")
+
+    def test_echo_fenced_single_file_greps_are_attributed(self):
+        d = tempfile.mkdtemp(prefix="sm-ef-")
+        self.addCleanup(shutil.rmtree, d, True)
+        for name in ("a.py", "b.py"):
+            with open(os.path.join(d, name), "w") as fh:
+                fh.write("\n".join(f"{name[0]}{i} = {i}" for i in range(1, 200)) + "\n")
+        cmd = 'echo "=== in a ==="\ngrep -n "a12 " a.py | head\necho\necho "=== in b ==="\ngrep -n "b40 " b.py'
+        obs = from_shell(cmd, "=== in a ===\n12:a12 = 12\n\n=== in b ===\n40:b40 = 40\n", d)
+        got = {(os.path.basename(o.path), n) for o in obs for n in (o.line_numbers or [])}
+        self.assertEqual(got, {("a.py", 12), ("b.py", 40)})
+        # Two single-file greps inside one fence: the bare "N:" lines cannot be told apart.
+        both = 'echo "=== both ==="\ngrep -n "a12 " a.py\ngrep -n "b40 " b.py'
+        obs = from_shell(both, "=== both ===\n12:a12 = 12\n40:b40 = 40\n", d)
+        self.assertEqual([n for o in obs for n in (o.line_numbers or [])], [])
+
+    def test_tilde_path_is_home_not_relative_to_cwd(self):
+        from unittest import mock
+        from sourcemark.observe import expand_assignments
+        home = tempfile.mkdtemp(prefix="sm-home-")
+        self.addCleanup(shutil.rmtree, home, True)
+        with mock.patch.dict(os.environ, {"HOME": home}):
+            obs = from_shell("sed -n '1,2p' ~/bin/tool", "a\nb\n", "/some/repo")
+            self.assertEqual([o.path for o in obs], [os.path.join(home, "bin", "tool")])
+            self.assertIn(os.path.join(home, "bin", "x"), expand_assignments('W=~/bin/x; cat "$W"'))
+
+    def test_wrapped_grep_is_still_a_grep(self):
+        from sourcemark.observe import _unwrap
+        self.assertEqual(_unwrap("command -v rg"), "command -v rg")
+        d = tempfile.mkdtemp(prefix="sm-wr-")
+        self.addCleanup(shutil.rmtree, d, True)
+        os.makedirs(os.path.join(d, "fn"))
+        with open(os.path.join(d, "fn", "index.ts"), "w") as fh:
+            fh.write("\n".join(f"x{i}" for i in range(1, 500)) + "\n")
+        obs = from_shell('timeout 150 rg -n --no-heading "x458$" 2>/dev/null | rg -i x | head -20', "fn/index.ts:458:x458\n", d)
+        self.assertEqual([(os.path.basename(o.path), o.line_numbers) for o in obs], [("index.ts", [458])])
+
+    def test_dotfile_citations_are_extracted(self):
+        got = [(c.path, c.line_start) for c in extract("See /r/.gitignore:7 and ~/.zshrc:12; python 3.12:5 is a version")]
+        self.assertEqual(got, [("/r/.gitignore", 7), ("~/.zshrc", 12)])
+
+    def test_heredoc_body_is_not_a_command(self):
+        from sourcemark.observe import _split_unquoted
+        cmd = "python3 - <<'EOF'\ncat notes.txt\nEOF\nsed -n 1,3p g.py"
+        self.assertEqual(_split_unquoted(cmd, newlines=True), ["python3 - <<'EOF'", "sed -n 1,3p g.py"])
+
+    def test_unbalanced_quote_falls_back_to_plain_split(self):
+        from sourcemark.observe import _split_unquoted
+        self.assertEqual(_split_unquoted("echo don't && cat f"), ["echo don't", "cat f"])
+        self.assertEqual(_split_unquoted('grep -n "a && b" f && cat g'), ['grep -n "a && b" f', "cat g"])

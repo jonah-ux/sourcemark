@@ -19,7 +19,8 @@ from dataclasses import dataclass, field
 _EXT = r"[A-Za-z][A-Za-z0-9]{0,7}"  # an extension starts with a letter: "3.12" or "1.26" are versions
 # Directory names may carry framework route syntax: app/(admin)/users/[id]/page.tsx
 _SEG = r"(?:[\w.@+\-]|\[[\w.\-]+\]|\([\w.\-]+\))+"
-_PATH = rf"(?:~?/|\.{{1,2}}/)?(?:{_SEG}/)*[\w.@+\-]+\.{_EXT}"
+# The file is name.ext, or a dotfile (.gitignore, .env, .zshrc) that has no other extension.
+_PATH = rf"(?:~?/|\.{{1,2}}/)?(?:{_SEG}/)*(?:[\w.@+\-]+\.{_EXT}|\.[A-Za-z][\w\-]{{1,30}})"
 _LINES = r"(?P<l1>\d{1,6})(?:\s*[-–]\s*L?(?P<l2>\d{1,6}))?"
 
 _MD_LINK = re.compile(rf"\[(?P<label>[^\]\n]{{0,200}})\]\((?P<path>{_PATH})(?:#L{_LINES})?\)")
@@ -28,6 +29,12 @@ _COLON = re.compile(rf"(?<![\w/.\-])(?P<path>{_PATH}):{_LINES}(?![\d])")
 # Inside backticks a path may contain spaces ("Application Support"); outside it cannot be told
 # apart from the prose around it.
 _TICK = re.compile(rf"`(?P<path>(?:~?/|\.{{1,2}}/)?(?:[^`\n/:]+/)+[^`\n/:]*\.{_EXT}):{_LINES}`")
+def _elided(url: str) -> bool:
+    """`https://x/ab…`, `https://x/ab...`, `https://x/.../b` name no page; GitHub `a...b` does."""
+    u = url.rstrip(")]},;:!?*'\"")
+    return "\u2026" in u or u.endswith("...") or "/.../" in u
+
+
 def valid_url(url: str) -> bool:
     """A real host, not a template: ``https://<node>``, ``https://{host}``, ``https://$``."""
     m = re.match(r"https?://([^/?#]*)", url)
@@ -103,7 +110,7 @@ def extract(
                     end = m.end() if rx is _MD_URL else m.start() + len(u)
                     # In [svc.py:4](https://…#L4) the label is a citation too: leave it free.
                     taken.append((m.start("url") - 1 if rx is _MD_URL else m.start(), end))
-                    if "\u2026" in u or "..." in u:
+                    if _elided(m.group(0)):
                         continue  # an elided link ("https://github.com/…") names no page
                     if not valid_url(u):
                         continue  # a placeholder ("https://<node>:8080") names no page
