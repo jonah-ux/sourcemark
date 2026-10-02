@@ -68,6 +68,22 @@ One hook is enough: the runtime passes the transcript path, which already record
 
 `SOURCEMARK_MODE`: `shadow` (default, record only) · `warn` (one-line summary) · `enforce` (send unsupported citations back to the agent to fix; never loops) · `off`. See [docs/hooks.md](docs/hooks.md).
 
+## Codex
+
+`sourcemark check` reads Codex rollouts too (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`); the format is detected automatically.
+
+```bash
+sourcemark check ~/.codex/sessions/2026/10/02/rollout-…jsonl --json
+```
+
+Codex runs its tools from small JavaScript cells, so the printed output is whatever the cell printed. sourcemark reads it conservatively:
+
+- A cell that runs one literal `exec_command` and prints its output unchanged is read like a shell command.
+- In cells that run several commands, only lines that name their own source count: `path:N:text` hits of a multi-file grep in the cell. So do `nl -ba` / `cat -n` lines under a label that appears exactly once.
+- When Codex cut an output (`…N tokens truncated…`), only lines that carry their own line numbers are kept.
+- A failed command and a computed command (`cmd: base + x`) give file-level evidence only.
+- Links in tool output are sourced, minus links the cell itself typed. Links reported by subagents are `delegated`.
+
 ## How it works
 
 A citation stores several independent ways to find the text again — the exact quote with 32 characters of context on each side, its position, fingerprints of the quote and the document, and the git repository, commit and path. Resolving tries the cheapest trustworthy evidence first (the original position, then git renames, then a search of the configured roots) and only accepts a fuzzy match when it is very similar or when **both** sides of its surrounding context agree. Secret-shaped text is never stored, only its fingerprint. Details in [docs/how-it-works.md](docs/how-it-works.md).
