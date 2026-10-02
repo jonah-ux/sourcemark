@@ -200,6 +200,33 @@ def _in_order(hay: str, parts: list[str]) -> bool:
     return True
 
 
+def _quotes_missing(c: Citation, obs: list, out: CitationCheck) -> bool:
+    """True when a code-like quote attributed to ``c`` is not in the cited lines as read."""
+    if not c.claimed_quotes or c.line_start is None:
+        return False
+    window: list[str] = []
+    for o in obs:
+        for n in range(c.line_start - 1, (c.line_end or c.line_start) + 2):
+            t = o.text_at(n)
+            if t is not None:
+                window.append(t)
+    hay = squash("\n".join(window))
+    for q in c.claimed_quotes:
+        if not _CODEISH.search(q):
+            continue
+        out.quotes_checked += 1
+        # "foo(...)" / "a … b": the agent elided text; every remaining fragment must be present.
+        parts = [squash(p) for p in re.split(r"\.\.\.|…", q)]
+        parts = [p for p in parts if len(p) >= 3]
+        if parts and _in_order(hay, parts):
+            out.quotes_found += 1
+    if out.quotes_checked and out.quotes_found < out.quotes_checked:
+        missing = out.quotes_checked - out.quotes_found
+        out.detail = f"{missing} quoted expression(s) not found in the cited lines as read"
+        return True
+    return False
+
+
 def _judge_lines(c: Citation, obs: list, out: CitationCheck) -> str:
     """Line-coverage verdict for a citation against a set of observations of one file."""
     covered: set[int] = set()
@@ -288,10 +315,12 @@ def check_citation(c: Citation, session: Session, *, now: bool = False, ledger: 
     if not obs:
         # Only subagents touched this file: judge the citation on their evidence, then label it.
         sub = _judge_lines(c, all_obs, out) if c.line_start is not None else "file_only"
-        if sub in ("verified", "partial", "file_only"):
+        if sub == "verified" and _quotes_missing(c, all_obs, out):
+            out.verdict = "quote_mismatch"  # a relayed claim is checked as strictly as one's own
+        elif sub in ("verified", "file_only"):
             out.verdict, out.detail = "delegated", "only a subagent read this; the orchestrator relayed it"
         else:
-            out.verdict = sub
+            out.verdict = sub  # partial / unread lines stay failing even when relayed
         return out
     if c.line_start is None:
         out.verdict = "file_only"
@@ -306,31 +335,15 @@ def check_citation(c: Citation, session: Session, *, now: bool = False, ledger: 
         if deleg:
             probe = CitationCheck(raw=c.raw, verdict="")
             if _judge_lines(c, obs + deleg, probe) == "verified":
-                out.verdict, out.detail = "delegated", "only a subagent read these lines; the orchestrator relayed them"
+                if _quotes_missing(c, obs + deleg, out):
+                    out.verdict = "quote_mismatch"
+                else:
+                    out.verdict, out.detail = "delegated", "only a subagent read these lines; the orchestrator relayed them"
                 return out
 
     # Quote check: code-like quotes next to the citation must appear in the lines read.
-    if out.verdict in ("verified", "partial") and c.claimed_quotes:
-        window: list[str] = []
-        for o in obs:
-            for n in range(c.line_start - 1, (c.line_end or c.line_start) + 2):
-                t = o.text_at(n)
-                if t is not None:
-                    window.append(t)
-        hay = squash("\n".join(window))
-        for q in c.claimed_quotes:
-            if not _CODEISH.search(q):
-                continue
-            out.quotes_checked += 1
-            # "foo(...)" / "a … b": the agent elided text; every remaining fragment must be present.
-            parts = [squash(p) for p in re.split(r"\.\.\.|…", q)]
-            parts = [p for p in parts if len(p) >= 3]
-            if parts and _in_order(hay, parts):
-                out.quotes_found += 1
-        if out.quotes_checked and out.quotes_found < out.quotes_checked:
-            out.verdict = "quote_mismatch"
-            missing = out.quotes_checked - out.quotes_found
-            out.detail = f"{missing} quoted expression(s) not found in the cited lines as read"
+    if out.verdict in ("verified", "partial") and _quotes_missing(c, obs, out):
+        out.verdict = "quote_mismatch"
 
     if now:
         cited = set(range(c.line_start, (c.line_end or c.line_start) + 1))
@@ -344,6 +357,17 @@ def check_citation(c: Citation, session: Session, *, now: bool = False, ledger: 
                         changed = True
             out.changed_since_read = changed
     return out
+
+
+class UnavailableLedger:
+    """Stands in for a ledger that could not be opened: every token is unknown (failing),
+    never silently unchecked."""
+
+    def __init__(self, why: str):
+        self.why = why
+
+    def get_mark(self, ref: str) -> None:
+        raise LookupError(f"ledger unavailable: {self.why}")
 
 
 def check_text(text: str, session: Session, *, now: bool = False, ledger: Any = None) -> Report:
