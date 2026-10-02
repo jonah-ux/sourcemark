@@ -19,7 +19,7 @@ import sys
 import time
 from typing import Any, TextIO
 
-from .check import PASSING, Report, check_text
+from .check import PASSING, Report, UnavailableLedger, check_text
 from .ledger import Ledger
 from .observe import read_claude_transcript
 from .redact import redact
@@ -107,13 +107,14 @@ def stop(payload: dict[str, Any], mode: str | None = None, ledger_path: str | No
     rep = Report()
     try:
         led_for_tokens: Any = Ledger(ledger_path)
-    except Exception:
-        led_for_tokens = None
+        led_for_tokens.db.execute("SELECT 1 FROM marks LIMIT 1").fetchall()
+    except Exception as e:
+        led_for_tokens = UnavailableLedger(str(e))
     try:
         for t in turn_texts:
             rep.checks.extend(check_text(t, sess, ledger=led_for_tokens).checks)
     finally:
-        if led_for_tokens is not None:
+        if isinstance(led_for_tokens, Ledger):
             led_for_tokens.close()
     elapsed = (time.perf_counter() - t0) * 1000
     try:
