@@ -1,0 +1,31 @@
+{
+  "version": "data-truth-change/v1",
+  "canonical_project": "jonah-ux/sourcemark",
+  "data_paths": [
+    {
+      "path": "src/sourcemark/db.py",
+      "sha256": "7fcbc5fe5bf39fe89571a2bc41dfb6875ba3bbbd00bb96afab32fc01fb4936b2"
+    },
+    {
+      "path": "tests/test_db.py",
+      "sha256": "a271fe065d4d7862df43637eabb1c19bdc9af51acaa132860249359dff08e41a"
+    }
+  ],
+  "facts": [
+    "sourcemark.public_cli.source_contract"
+  ],
+  "why_trace": {
+    "verdict": "GENUINE_BUG",
+    "root_cause": "Citations could only point at files; a number an agent read from a database had no stable reference that could later show whether it still held.",
+    "evidence": [
+      "tests/test_db.py starts a throwaway PostgreSQL cluster and proves intact, drifted (only cited columns), deleted, NULL, and composite-key citations",
+      "The psql runner forces default_transaction_read_only; INSERT and data-modifying CTEs are refused in the integration test",
+      "Sensitive-looking columns are stored as fingerprints only"
+    ]
+  },
+  "documentation": [
+    "README.md",
+    "src/sourcemark/db.py"
+  ],
+  "source_commit": "ec02edd7da7a230125222688914ae6a2c6124b21"
+}
