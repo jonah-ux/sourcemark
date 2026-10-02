@@ -114,9 +114,18 @@ def cmd_check(args: argparse.Namespace) -> int:
         body = [t for (_, t), n in zip(texts, sess.text_turns) if n == last] or [t for _, t in texts[-1:]]
     from .check import Report
 
+    from .check import UnavailableLedger
+    from .ledger import default_path
+
+    lpath = args.ledger or default_path()
+    led: Any = Ledger(lpath) if os.path.isfile(lpath) else UnavailableLedger(f"no ledger at {lpath}")
     rep = Report()
-    for t in body:
-        rep.checks.extend(check_text(t, sess, now=args.now).checks)
+    try:
+        for t in body:
+            rep.checks.extend(check_text(t, sess, now=args.now, ledger=led).checks)
+    finally:
+        if isinstance(led, Ledger):
+            led.close()
     lines = [f"{c.verdict:15} {c.raw[:100]}" + (f"  ({c.detail})" if c.detail else "") for c in rep.checks]
     lines.append(f"-- {rep.passing}/{rep.total} backed by this session")
     _out(args, rep.to_dict(), "\n".join(lines))
