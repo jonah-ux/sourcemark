@@ -27,7 +27,7 @@ _TOKEN = re.compile(r"\[sm:(?P<tok>[a-z2-7]{6,26})\]")
 _MD_URL = re.compile(r"\[(?P<label>[^\]\n]{0,200})\]\((?P<url>https?://[^)\s]+)\)")
 _BARE_URL = re.compile(r"(?<![\(\[<\w])https?://[^\s)\]>`\"']+")
 _CODE = re.compile(r"`([^`\n]{4,200})`")
-_QUOTED = re.compile(r"[\"“]([^\"”\n]{8,200})[\"”]")
+_SENTENCE_BREAK = re.compile(r"(?:[.!?](?:\s|$))|\n")
 
 
 @dataclass
@@ -102,14 +102,37 @@ def extract(
         found.append(Citation(m.group(0), m.start(), m.end(), token=m.group("tok"), form="token"))
 
     found.sort(key=lambda c: c.start)
-    for c in found:
-        lo, hi = max(0, c.start - quote_window), min(len(text), c.end + quote_window)
-        window = text[lo:hi]
-        for rx in (_CODE, _QUOTED):
-            for q in rx.findall(window):
-                if c.path and (c.path in q or q in c.raw):
-                    continue  # the code span is the citation itself
-                if re.fullmatch(rf"{_PATH}(?::\d+(?:-\d+)?)?", q.strip()):
-                    continue  # a bare path, not a quote
-                c.claimed_quotes.append(q)
+    _attach_quotes(text, found, quote_window)
     return found
+
+
+def _attach_quotes(text: str, cites: list[Citation], window: int) -> None:
+    """Give each inline-code quote to exactly ONE citation: the nearest one in the same sentence.
+
+    Dense answers put several citations in one paragraph; a fixed window around each
+    citation would hand one claim's quote to its neighbours.
+    """
+    path_cites = [c for c in cites if c.path]
+    if not path_cites:
+        return
+    for m in _CODE.finditer(text):
+        q = m.group(1)
+        if re.fullmatch(rf"{_PATH}(?::\d+(?:[-–]\d+)?)?", q.strip()) or any(q in c.raw for c in path_cites):
+            continue  # the code span IS a citation, not a quote
+        best: Citation | None = None
+        best_d = window + 1
+        for c in path_cites:
+            if c.start >= m.end():
+                lo, hi = m.end(), c.start
+            elif c.end <= m.start():
+                lo, hi = c.end, m.start()
+            else:
+                continue
+            if hi - lo > window or _SENTENCE_BREAK.search(text, lo, hi):
+                continue
+            # prefer a citation that FOLLOWS the quote ("`code` (path:line)") on ties
+            d = (hi - lo) + (0 if c.start >= m.end() else 1)
+            if d < best_d:
+                best, best_d = c, d
+        if best is not None:
+            best.claimed_quotes.append(q)
