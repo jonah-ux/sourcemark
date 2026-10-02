@@ -13,13 +13,13 @@ Python 3.11+ · Zero runtime dependencies · MIT · Local only · Early release
 
 ```console
 python3 -m venv .venv && . .venv/bin/activate
-python3 -m pip install 'git+https://github.com/jonah-ux/sourcemark.git@v0.1.0'
+python3 -m pip install 'git+https://github.com/jonah-ux/sourcemark.git@v0.2.0'
 sourcemark --version
 python3 demos/demo.py        # 30-second synthetic walkthrough (from a checkout)
 ```
 
 Each [release](https://github.com/jonah-ux/sourcemark/releases) also ships a wheel, an sdist and
-`SHA256SUMS`; `pip install sourcemark-0.1.0-py3-none-any.whl` after checking the hash. Python 3.11+,
+`SHA256SUMS`; `pip install sourcemark-0.2.0-py3-none-any.whl` after checking the hash. Python 3.11+,
 no dependencies.
 
 ## Usage
