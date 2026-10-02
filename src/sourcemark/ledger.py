@@ -185,6 +185,15 @@ class Ledger:
         if "head" in meta or "count" in meta:
             if meta.get("head") != (heads[-1] if heads else None) or meta.get("count") != str(n):
                 problems.append(f"events missing or added: head/count say {meta.get('count')}, found {n}")
+        seqs = [r[0] for r in self.db.execute("SELECT seq FROM events ORDER BY seq")]
+        if seqs != list(range(1, len(seqs) + 1)):
+            problems.append("event sequence numbers have gaps (events were deleted)")
+        row = self.db.execute("SELECT seq FROM sqlite_sequence WHERE name = 'events'").fetchone()
+        if row and row[0] != n:
+            problems.append(f"{row[0]} events were ever written but {n} remain")
+        if n and timed and not ("head" in meta or "count" in meta):
+            # A v2 ledger always records head/count with its first event: their absence means removal.
+            problems.append("head/count records are missing (deleted to hide removed events?)")
         rows = set()
         for mid, token, body in self.db.execute("SELECT id, token, body FROM marks"):
             rows.add(mid)
