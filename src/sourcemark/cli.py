@@ -202,7 +202,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 0
-    return int(args.func(args) or 0)
+    try:
+        return int(args.func(args) or 0)
+    except (ValueError, LookupError, FileNotFoundError, IsADirectoryError, PermissionError) as e:
+        # Bad input is a usage error (exit 2), not a crash.
+        print(f"sourcemark: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
