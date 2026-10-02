@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from .anchor import Mark, compute_id
-from .redact import find_secrets
+from .redact import find_secrets, redact
 from .textnorm import sha256_hex
 
 Runner = Callable[[str], list[dict[str, Any]]]
@@ -75,11 +75,21 @@ class PsqlRunner:
         if self.dsn:
             cmd += ["-d", self.dsn]
         cmd += ["-c", wrapped]
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout)
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            # str(TimeoutExpired) repeats the argv, which holds the DSN and its password.
+            raise RuntimeError(f"psql timed out after {self.timeout:g}s") from None
         if out.returncode != 0:
-            raise RuntimeError(out.stderr.strip() or f"psql exited {out.returncode}")
+            raise RuntimeError(self._scrub(out.stderr.strip()) or f"psql exited {out.returncode}")
         text = out.stdout.strip()
         return json.loads(text) if text else []
+
+
+    def _scrub(self, text: str) -> str:
+        if self.dsn:
+            text = text.replace(self.dsn, "[dsn]")
+        return redact(text)[0]
 
 
 def primary_key(run: Runner, schema: str, table: str) -> list[str]:
@@ -166,7 +176,7 @@ def resolve_row(mark: Mark, run: Runner) -> DbResolution:
     try:
         rows = run(_row_sql(src["schema"], src["table"], src["pk"], cols))
     except Exception as e:  # unreachable DB, dropped table, permissions...
-        return DbResolution(mark.id, "error", detail=str(e)[:300], elapsed_ms=(time.perf_counter() - t0) * 1000)
+        return DbResolution(mark.id, "error", detail=redact(str(e))[0][:300], elapsed_ms=(time.perf_counter() - t0) * 1000)
     res = DbResolution(mark.id, "deleted", elapsed_ms=0.0)
     if rows:
         row = rows[0]
