@@ -22,7 +22,7 @@ from typing import Any, TextIO
 from .check import PASSING, Report, UnavailableLedger, check_text
 from .ledger import Ledger
 from .observe import read_claude_transcript
-from .redact import redact
+from .redact import redact_obj
 
 MODES = ("off", "shadow", "warn", "enforce")
 # Verdicts that mean "this citation is not backed by the session's evidence".
@@ -82,17 +82,6 @@ def summarize(rep: Report) -> str:
     return f"{head}, {len(bad)} not backed: {items}"
 
 
-def _redacted(value: Any) -> Any:
-    """Cited text (URLs, paths, quotes) is stored in the ledger: never store a secret in it."""
-    if isinstance(value, str):
-        return redact(value)[0]
-    if isinstance(value, dict):
-        return {k: _redacted(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redacted(v) for v in value]
-    return value
-
-
 def stop(payload: dict[str, Any], mode: str | None = None, ledger_path: str | None = None) -> dict[str, Any] | None:
     mode = (mode or os.environ.get("SOURCEMARK_MODE") or "shadow").lower()
     if mode == "off" or mode not in MODES:
@@ -121,7 +110,7 @@ def stop(payload: dict[str, Any], mode: str | None = None, ledger_path: str | No
         with Ledger(ledger_path) as led:
             led.append(
                 "check",
-                _redacted({"mode": mode, "elapsed_ms": round(elapsed, 1), "payload_keys": sorted(payload),
+                redact_obj({"mode": mode, "elapsed_ms": round(elapsed, 1), "payload_keys": sorted(payload),
                            "turn_texts": len(turn_texts), **rep.to_dict()}),
                 session=payload.get("session_id"),
             )
