@@ -781,3 +781,20 @@ class AdversarialRound3DelegatedTokenTest(unittest.TestCase):
             fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "per [sm:zzzzzzzzzz]"}]}}) + "\n")
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(main(["--ledger", os.path.join(d, "none.db"), "check", t]), 1)
+
+
+class GhListRefsTest(unittest.TestCase):
+    def test_rows_of_a_pr_list_are_sourced(self):
+        from sourcemark.observe import gh_refs
+
+        cmd = "gh pr list --repo acme/app --state all --json number,state,title | python3 -c 'print_rows()'"
+        out = "10543 MERGED 2026-09-25T00:59:11Z feat: hooks\n10545 MERGED 2026-09-25T00:45:36Z fix: gate\n2026 rows total\n"
+        got = gh_refs(cmd, out)
+        self.assertIn("https://github.com/acme/app/pull/10545", got)
+        self.assertNotIn("https://github.com/acme/app/pull/2026", got)  # no state on that line
+
+    def test_two_listed_repos_are_ambiguous(self):
+        from sourcemark.observe import gh_refs
+
+        cmd = "gh pr list --repo acme/app; gh pr list --repo acme/web"
+        self.assertEqual(gh_refs(cmd, "12 OPEN title\n"), set())

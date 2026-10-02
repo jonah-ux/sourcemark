@@ -389,6 +389,7 @@ def gh_refs(command: str, stdout: str = "") -> set[str]:
     urls: set[str] = set()
     if not stdout.strip() or re.search(r"\|\|\s*(?:true|:)\b", command):
         return urls
+    listed: set[str] = set()  # repos whose PR/issue LIST ran in this command
     for seg in re.split(r"\s*(?:&&|;|\|\||\||\n)\s*", command):
         # gh must be the command run, possibly inside `X=$(...)`; not text in an echo or string.
         if not re.match(r"\s*(?:[A-Za-z_]\w*=)?(?:\$\(\s*)?(?:(?:timeout|env)\s+\S+\s+)*gh\s", seg):
@@ -397,7 +398,20 @@ def gh_refs(command: str, stdout: str = "") -> set[str]:
         if ref and repo:
             for kind in ("pull", "issues"):  # GitHub serves a PR under both
                 urls.add(normalize_url(f"https://github.com/{repo.group('repo')}/{kind}/{ref.group('num')}"))
+        if repo and _GH_LIST.search(seg):
+            listed.add(repo.group("repo"))
+    if len(listed) == 1:
+        # `gh pr list --repo o/r`: each row the session saw ("10545  MERGED  2026-…  title") names
+        # o/r#10545. A row counts only with a PR/issue state on it, so other numbers do not.
+        repo = next(iter(listed))
+        for m in _GH_ROW.finditer(stdout):
+            for kind in ("pull", "issues"):
+                urls.add(normalize_url(f"https://github.com/{repo}/{kind}/{m.group(1)}"))
     return urls
+
+
+_GH_LIST = re.compile(r"\bgh\s+(?:(?:pr|issue)\s+list|search\s+(?:prs|issues))\b")
+_GH_ROW = re.compile(r"(?m)^#?(\d{1,7})\b[^\n]*\b(?:OPEN|MERGED|CLOSED|open|merged|closed)\b")
 
 
 # Options whose value is the next argument (so it is neither the pattern nor a path).
