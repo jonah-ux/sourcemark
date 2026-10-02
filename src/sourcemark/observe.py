@@ -45,6 +45,9 @@ class Observation:
         return self.lines[i] if 0 <= i < len(self.lines) else None
 
 
+_FILE_LEVEL_TOOLS = ("Bash-touch", "Bash-redirect", "Bash-output", "Bash-copy", "Bash-append")
+
+
 @dataclass
 class Session:
     observations: list[Observation] = field(default_factory=list)
@@ -72,7 +75,8 @@ class Session:
         return {o.path for o in self.observations}
 
     def basenames(self) -> set[str]:
-        return {os.path.basename(o.path) for o in self.observations}
+        # Only files actually read or written: a `which node` hit must not make "node:20" a citation.
+        return {os.path.basename(o.path) for o in self.observations if o.lines and o.tool not in _FILE_LEVEL_TOOLS}
 
     def for_path(self, path: str) -> list[Observation]:
         return [o for o in self.observations if o.path == path]
@@ -104,6 +108,8 @@ def from_read(tool_input: dict[str, Any], result: Any, at: str | None = None) ->
             start = int(f.get("startLine") or 1)
         except (TypeError, ValueError):
             start = 1
+        if not f["content"]:
+            return None  # offset past the end: nothing was shown
         lines = f["content"].split("\n")
         if lines and lines[-1] == "" and len(lines) > 1:
             lines = lines[:-1]
@@ -226,8 +232,11 @@ _ASSIGN = re.compile(r"(?:^|[;&|\n(]\s*)(?:export\s+)?(?P<name>[A-Za-z_]\w*)=(?P
 def expand_assignments(command: str) -> str:
     """Substitute ``$NAME`` / ``${NAME}`` for plain ``NAME=value`` assignments made in the command."""
     vals: dict[str, str] = {}
+    seen: dict[str, set[str]] = {}
     for m in _ASSIGN.finditer(command):
-        vals[m.group("name")] = m.group("val").strip("'\"")
+        seen.setdefault(m.group("name"), set()).add(m.group("val").strip("'\""))
+    # A variable set to two values (F=a.py; ...; F=b.py) cannot be substituted by position here.
+    vals = {k: next(iter(v)) for k, v in seen.items() if len(v) == 1}
     if not vals:
         return command
     return re.sub(
@@ -373,10 +382,17 @@ _GH_REF = re.compile(r"\bgh\s+(?P<kind>pr|issue)\s+(?:view|merge|checks|diff|com
 _GH_REPO = re.compile(r"(?:-R|--repo)[=\s]+(?:https://github\.com/)?(?P<repo>[\w.\-]+/[\w.\-]+)")
 
 
-def gh_refs(command: str) -> set[str]:
-    """``gh pr view 12 --repo o/r`` that succeeded: the session looked at o/r#12 on GitHub."""
+def gh_refs(command: str, stdout: str = "") -> set[str]:
+    """``gh pr view 12 --repo o/r`` that ran and printed something: the session looked at
+    o/r#12. Not when the text is an argument (``echo "gh pr view 12 ..."``) or the failure is
+    masked (``|| true``, ``2>/dev/null``) with nothing printed."""
     urls: set[str] = set()
+    if not stdout.strip() or re.search(r"\|\|\s*(?:true|:)\b", command):
+        return urls
     for seg in re.split(r"\s*(?:&&|;|\|\||\||\n)\s*", command):
+        # gh must be the command run, possibly inside `X=$(...)`; not text in an echo or string.
+        if not re.match(r"\s*(?:[A-Za-z_]\w*=)?(?:\$\(\s*)?(?:(?:timeout|env)\s+\S+\s+)*gh\s", seg):
+            continue
         ref, repo = _GH_REF.search(seg), _GH_REPO.search(seg)
         if ref and repo:
             for kind in ("pull", "issues"):  # GitHub serves a PR under both
@@ -389,7 +405,7 @@ _GREP_VALUE_SHORT = {"grep": set("ABCmefdD"), "rg": set("ABCmefgtTMjEd")}
 _GREP_VALUE_LONG = {
     "--glob", "--iglob", "--type", "--type-not", "--max-count", "--context", "--after-context",
     "--before-context", "--regexp", "--file", "--max-depth", "--max-columns", "--threads",
-    "--include", "--exclude", "--exclude-dir", "--color", "--colour", "--sort", "--sortr",
+    "--include", "--exclude", "--exclude-dir", "--sort", "--sortr",
     "--encoding", "--type-add", "--replace", "--pre", "--pre-glob",
 }
 
@@ -456,7 +472,7 @@ def _numbered(args: list[str]) -> bool:
     )
 
 
-def _grep_evidence(argv: list[str], stdout: str, cwd: str | None, at: str | None, *, alone: bool) -> list[Observation] | None:
+def _grep_evidence(argv: list[str], stdout: str, cwd: str | None, at: str | None, *, alone: bool, other_printers: bool = False) -> list[Observation] | None:
     """Line evidence from a grep/rg run, or None when its output cannot be read as numbered hits:
     no -n, or other commands printed into the same stdout (a linter's ``f.py:97:5:`` looks alike)."""
     if not argv:
@@ -464,7 +480,12 @@ def _grep_evidence(argv: list[str], stdout: str, cwd: str | None, at: str | None
     tool, args = os.path.basename(argv[0]), argv[1:]
     if not _numbered(args):
         return None
-    obs = from_grep_text(stdout, cwd, "Bash", at, single_file=_single_target(args, cwd, tool), roots=_grep_targets(args, cwd, tool))
+    single = _single_target(args, cwd, tool)
+    if single and other_printers:
+        # A single-file grep prints bare "N:text"; another file printed into the same stdout
+        # (a second grep, a cat) would have its lines credited to this file.
+        return [Observation(single, 0, [], "Bash-touch", at, line_numbers=[])]
+    obs = from_grep_text(stdout, cwd, "Bash", at, single_file=single, roots=_grep_targets(args, cwd, tool))
     if alone:
         return obs
     # Other commands printed into the same stdout: keep only lines that match the pattern.
@@ -512,26 +533,49 @@ def _grep_matcher(args: list[str], tool: str):
 _SILENT = re.compile(r"^(?:(?:export\s+)?[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|\S*)|cd(?:\s+\S+)?|set\s+[-+]\w+)$")
 
 
+_PRINTERS = {"cat", "sed", "head", "tail", "nl", "rg", "grep", "awk", "less", "bat", "more"}
+
+
+def _drop_redirects(argv: list[str]) -> list[str]:
+    """``cat a.py 2>/dev/null`` / ``sed ... 2>&1``: redirections are not operands."""
+    out, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+            continue
+        if re.fullmatch(r"\d*(?:>>?|<)", a) or a == "&>":
+            skip = True  # the target follows as its own token
+            continue
+        if re.fullmatch(r"\d*(?:>>?|<|&>)&?\S+", a):
+            continue
+        out.append(a)
+    return out
+
+
 def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None) -> list[Observation]:
     """Recognize simple file-printing commands whose stdout is a known file slice."""
     out: list[Observation] = []
-    owner: dict[int, str] = {}  # index in ``out`` -> the segment that printed it
-    loud = [x for x in re.split(r"\s*(?:&&|;|\|\|)\s*", command) if x.strip() and not _SILENT.match(x.strip())]
-    for segment in re.split(r"\s*(?:&&|;|\|\|)\s*", command):
-        seg = segment.strip()
+    owner: dict[int, int] = {}  # index in ``out`` -> index of the segment that printed it
+    segments = [x.strip() for x in re.split(r"\s*(?:&&|;|\|\|)\s*", command)]
+    loud = [x for x in segments if x and not _SILENT.match(x)]
+    printers = [x for x in loud if (x.split() or [""])[0].rsplit("/", 1)[-1] in _PRINTERS]
+    if any(re.match(r"cd\b", x) for x in segments[1:]):
+        # The command changed directory part-way: the same relative name can mean two files.
+        return [o for o in _file_level_mentions(segments, cwd, at)]
+    for k, seg in enumerate(segments):
         if "|" in seg:
             first = seg.split("|", 1)[0].strip()
             if first.startswith(("rg ", "grep ")):
                 try:
-                    fargv = shlex.split(first)
+                    fargv = _drop_redirects(shlex.split(first))
                 except ValueError:
                     fargv = []
-                grep = _grep_evidence(fargv, stdout, cwd, at, alone=len(loud) == 1)
+                grep = _grep_evidence(fargv, stdout, cwd, at, alone=len(loud) == 1, other_printers=len(printers) > 1)
                 if grep is not None:
                     return grep
             continue
         try:
-            argv = shlex.split(seg)
+            argv = _drop_redirects(shlex.split(seg))
         except ValueError:
             continue
         if not argv:
@@ -544,7 +588,7 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
         if cmd == "cat" and any(a.startswith("-") for a in args):
             continue  # cat -s/-n/-v... changes the lines; do not attribute line numbers
         if cmd in ("rg", "grep"):
-            grep = _grep_evidence(argv, stdout, cwd, at, alone=len(loud) == 1)
+            grep = _grep_evidence(argv, stdout, cwd, at, alone=len(loud) == 1, other_printers=len(printers) > 1)
             if grep is not None:
                 return grep
             continue
@@ -568,10 +612,9 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
         elif cmd == "nl":
             lines = [re.sub(r"^\s*\d+\t", "", x) for x in lines]
         out.append(Observation(os.path.normpath(path), start, lines, "Bash", at))
-        owner[len(out) - 1] = segment
-    segments = [x for x in re.split(r"\s*(?:&&|;|\|\|)\s*", command) if x.strip() and not _SILENT.match(x.strip())]
-    if len(out) > 1 or (out and len(segments) > 1):
-        split = _split_by_echo_markers(segments, stdout, {owner[i].strip(): o for i, o in enumerate(out)})
+        owner[len(out) - 1] = k
+    if len(out) > 1 or (out and len(loud) > 1):
+        split = _split_by_echo_markers(segments, stdout, {owner[i]: o for i, o in enumerate(out)})
         if split is not None:
             return split
         # Several things printed into one stdout: lines cannot be attributed; keep file-level only.
@@ -579,24 +622,49 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
     return out
 
 
-def _split_by_echo_markers(segments: list[str], stdout: str, printers: dict[str, Observation]) -> list[Observation] | None:
+def _file_level_mentions(segments: list[str], cwd: str | None, at: str | None) -> list[Observation]:
+    """Absolute paths a command printed from: file-level evidence only (relative ones are ambiguous)."""
+    out = []
+    for seg in segments:
+        try:
+            argv = _drop_redirects(shlex.split(seg))
+        except ValueError:
+            continue
+        if argv and os.path.basename(argv[0]) in _PRINTERS:
+            for a in argv[1:]:
+                p = os.path.expanduser(a)
+                if os.path.isabs(p) and _isfile(p):
+                    out.append(Observation(os.path.normpath(p), 0, [], "Bash-touch", at, line_numbers=[]))
+    return out
+
+
+def _split_by_echo_markers(segments: list[str], stdout: str, printers: dict[int, Observation]) -> list[Observation] | None:
     """``echo "--- a"; sed -n 1,9p a; echo "--- b"; cat b``: each literal echo line in stdout
-    fences off the output of the single command after it. Anything ambiguous returns None."""
+    fences off the output of the single command after it. Anything ambiguous returns None:
+    a marker that is blank or too short, or that occurs in stdout more often than it was echoed
+    (a markdown ``---`` inside a printed file would split it in the wrong place)."""
     lines = stdout.split("\n")
     if lines and lines[-1] == "":
         lines = lines[:-1]
-    groups: list[list[str]] = [[]]
+    groups: list[list[int]] = [[]]
     markers: list[str] = []
-    for seg in (x.strip() for x in segments):
+    for k, seg in enumerate(segments):
+        if not seg or _SILENT.match(seg):
+            continue
         m = re.fullmatch(r"echo\s+(?:\"([^\"$`\\]*)\"|'([^']*)')", seg)
         if m:
-            markers.append(m.group(1) if m.group(1) is not None else m.group(2))
+            mk = m.group(1) if m.group(1) is not None else m.group(2)
+            if len(mk.strip()) < 3:
+                return None
+            markers.append(mk)
             groups.append([])
         else:
-            groups[-1].append(seg)
+            groups[-1].append(k)
     if not markers:
         return None
-    # Locate each marker line in order.
+    for mk in set(markers):
+        if lines.count(mk) != markers.count(mk):
+            return None
     pos, bounds = 0, []
     for mk in markers:
         try:
@@ -609,7 +677,7 @@ def _split_by_echo_markers(segments: list[str], stdout: str, printers: dict[str,
     result: list[Observation] = []
     for g, segs in enumerate(groups):
         chunk = lines[edges[g] + 1 : edges[g + 1]]
-        found = [printers[x] for x in segs if x in printers]
+        found = [printers[k] for k in segs if k in printers]
         if not found:
             continue
         o = found[0]
@@ -621,6 +689,9 @@ def _split_by_echo_markers(segments: list[str], stdout: str, printers: dict[str,
 
 
 # --- transcript readers ---------------------------------------------------------
+
+
+_RUNTIME_NOTICES = ("<task-notification>", "<system-reminder>", "<command-name>", "<local-command")
 
 
 def read_claude_transcript(path: str, subagents: bool = True) -> tuple[Session, list[tuple[str, str]]]:
@@ -659,6 +730,10 @@ def read_claude_transcript(path: str, subagents: bool = True) -> tuple[Session, 
                     and any(isinstance(c, dict) and c.get("type") == "text" for c in content)
                     and not any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content)
                 )
+                origin = e.get("origin") if isinstance(e.get("origin"), dict) else {}
+                text0 = content if isinstance(content, str) else ""
+                if origin.get("kind") not in (None, "human", "user") or text0.lstrip().startswith(_RUNTIME_NOTICES):
+                    prompt = False  # a background-task notice is not the human starting a new turn
                 if prompt:
                     turn += 1  # a new human prompt starts a new turn
             if e.get("type") == "user" and isinstance(content, str):
@@ -687,11 +762,15 @@ def read_claude_transcript(path: str, subagents: bool = True) -> tuple[Session, 
                         sess.delegated_urls |= urls_in(tur if tur is not None else c.get("content"))
                     elif not is_error_result(tur, c.get("content"), bool(c.get("is_error"))):
                         # A URL inside an error ("fetch failed: https://...") was not obtained.
-                        sess.urls |= urls_in(tur if tur is not None else c.get("content"))
+                        got = urls_in(tur if tur is not None else c.get("content"))
+                        if name in ("Bash", "Shell") and isinstance(tin, dict):
+                            cmd = str(tin.get("command", ""))
+                            got -= urls_in(cmd)  # `echo https://x` returns what the agent typed
+                            out_text = tur.get("stdout") if isinstance(tur, dict) else _text_of(c.get("content"))
+                            sess.urls |= gh_refs(cmd, out_text if isinstance(out_text, str) else "")
+                        sess.urls |= got
                         if _is_web_tool(name):
                             sess.urls |= urls_in(tin)
-                        if name in ("Bash", "Shell") and isinstance(tin, dict):
-                            sess.urls |= gh_refs(str(tin.get("command", "")))
                     for obs in observe_tool(
                         name, tin, tur, c.get("content"), e.get("cwd") or sess.cwd, at, bool(c.get("is_error"))
                     ):
@@ -713,13 +792,25 @@ def read_claude_transcript(path: str, subagents: bool = True) -> tuple[Session, 
     return sess, texts
 
 
-_AUTHORING_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+_AUTHORING_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "TodoWrite"}
 _DELEGATING_TOOLS = {"Task", "Agent"}
 
 
 def _is_web_tool(name: str) -> bool:
     n = name.lower()
     return n in ("webfetch", "websearch") or ("fetch" in n or "search" in n or "browse" in n) and n.startswith("mcp__")
+
+
+def _persisted_preview(text: str) -> str | None:
+    """``<persisted-output>`` results show the model a ~2 KB preview; the full output went to a
+    file. Return the preview's complete lines (the last one may be cut), or None."""
+    if "<persisted-output>" not in text:
+        return None
+    m = re.search(r"Preview \(first[^)]*\):\n(.*?)(?:\n\.\.\.)?\n</persisted-output>", text, re.S)
+    if not m:
+        return ""
+    lines = m.group(1).split("\n")
+    return "\n".join(lines[:-1]) + "\n" if len(lines) > 1 else ""
 
 
 def _text_of(content: Any) -> str:
@@ -757,8 +848,11 @@ def from_edit(tool_input: dict[str, Any], structured: Any, at: str | None = None
         for ln in hunk.get("lines") or []:
             if ln.startswith("-"):
                 continue
-            nums.append(n)
-            texts.append(ln[1:] if ln[:1] in ("+", " ") else ln)
+            if ln.startswith("+"):
+                # Only the lines the agent wrote: the patch's context lines were never shown
+                # to it (the tool result just says the file was updated).
+                nums.append(n)
+                texts.append(ln[1:])
             n += 1
     if not nums:
         return None
@@ -837,6 +931,8 @@ def observe_tool(
         obs = from_edit(tool_input, structured, at)
         if obs:
             yield obs
+    elif name == "Grep" and _persisted_preview(_text_of(content)) is not None:
+        return  # a saved-to-disk grep result: only a cut preview was seen; no line evidence
     elif name == "Grep":
         unnumbered = tool_input.get("output_mode") == "content" and tool_input.get("-n") is False
         text = structured.get("content") if isinstance(structured, dict) else None
@@ -861,6 +957,9 @@ def observe_tool(
     elif name in ("Bash", "Shell"):
         stdout = structured.get("stdout") if isinstance(structured, dict) else None
         stdout = stdout if isinstance(stdout, str) else _text_of(content)
+        preview = _persisted_preview(_text_of(content))
+        if preview is not None or (isinstance(structured, dict) and structured.get("persistedOutputPath")):
+            stdout = preview or ""  # the model saw only the preview, not the saved full output
         cmd = expand_assignments(tool_input.get("command", ""))
         ecwd = effective_cwd(cmd, cwd)
         produced = list(from_shell_writes(cmd, ecwd, at)) + list(from_shell(_CD.sub("", cmd, count=1), stdout, ecwd, at))

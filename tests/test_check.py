@@ -647,3 +647,137 @@ class AdversarialRound2UrlTest(unittest.TestCase):
         self.assertEqual(self.v(s, f"see {u}."), "url_verified")
         self.assertEqual(self.v(s, "see https://en.wikipedia.org/wiki/Python"), "url_unsourced")
         self.assertEqual([c.url for c in extract(f"(see {u})")], [u])
+
+
+class AdversarialRound3CheckTest(unittest.TestCase):
+    """Third independent adversarial review: evidence the model never actually saw."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="sm-adv3-")
+        self.addCleanup(shutil.rmtree, self.d, True)
+        self.n = 0
+        self.entries = []
+
+    def file(self, name, lines):
+        p = os.path.join(self.d, name)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+        return p
+
+    def tool(self, name, tin, tur, content):
+        self.n += 1
+        tid = f"t{self.n}"
+        self.entries += [
+            {"type": "assistant", "cwd": self.d, "message": {"role": "assistant", "content": [{"type": "tool_use", "id": tid, "name": name, "input": tin}]}},
+            {"type": "user", "cwd": self.d, "toolUseResult": tur, "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": content}]}},
+        ]
+
+    def bash(self, cmd, stdout, content=None, **extra):
+        self.tool("Bash", {"command": cmd}, {"stdout": stdout, "stderr": "", **extra}, stdout if content is None else content)
+
+    def session(self):
+        t = os.path.join(self.d, "s.jsonl")
+        with open(t, "w") as fh:
+            fh.write("".join(json.dumps(e) + "\n" for e in self.entries))
+        return read_claude_transcript(t)
+
+    def v(self, text):
+        return [c.verdict for c in check_text(text, self.session()[0]).checks]
+
+    def test_persisted_output_credits_only_the_preview(self):
+        lines = [f"value_{i} = {i}" for i in range(1, 2001)]
+        self.file("big.py", lines)
+        full = "\n".join(lines)
+        preview = "\n".join(lines[:60]) + "\nvalue_61 = 6"
+        seen = f"<persisted-output>\nOutput too large (40KB). Full output saved to: /x/o.txt\n\nPreview (first 2KB):\n{preview}\n...\n</persisted-output>"
+        self.bash("cat big.py", full[:30000], content=seen, persistedOutputPath="/x/o.txt")
+        self.assertEqual(self.v("see big.py:700 and big.py:30"), ["unread_lines", "verified"])
+
+    def test_two_single_file_greps_are_not_attributed(self):
+        self.file("m1.py", ["import os", "x = 1", "def run():", "    pass"])
+        self.file("m2.py", ["a", "b", "c", "d", "e", "def run_fast():"])
+        self.bash('grep -n "def run" m1.py && grep -n "def run" m2.py', "3:def run():\n6:def run_fast():\n")
+        self.assertNotEqual(self.v("m1.py:6 defines `def run_fast():`"), ["verified"])
+
+    def test_path_in_a_link_label_is_checked(self):
+        self.assertIn("unresolved", self.v("[nothere.py:88](https://github.com/acme/app/blob/main/nothere.py#L88)"))
+
+    def test_echo_marker_ambiguities_give_no_lines(self):
+        self.file("a.py", ["def alpha():", "    pass", "", "def secret_beta():", "    pass"])
+        self.file("b.py", ["x = 1", "y = 2"])
+        self.bash('cat a.py; echo ""; cat b.py', "def alpha():\n    pass\n\ndef secret_beta():\n    pass\n\nx = 1\ny = 2\n")
+        self.assertNotEqual(self.v("b.py:4 has `def secret_beta():`"), ["verified"])
+
+    def test_reassigned_variable_is_not_substituted(self):
+        from sourcemark.observe import expand_assignments
+
+        self.assertIn("$F", expand_assignments('F=a.py; cat $F; F=b.py; cat $F'))
+
+    def test_mid_command_cd_gives_no_lines(self):
+        for sub, val in (("api", "False"), ("web", "True")):
+            self.file(f"{sub}/config.py", ["x = 1", f"DEBUG = {val}"])
+        self.bash('cd api && echo "== api" && cat config.py; cd ../web && echo "== web" && cat config.py',
+                  "== api\nx = 1\nDEBUG = False\n== web\nx = 1\nDEBUG = True\n")
+        self.assertNotEqual(self.v(f"`DEBUG = True` at {self.d}/api/config.py:2"), ["verified"])
+
+    def test_task_notification_does_not_start_a_new_turn(self):
+        self.entries.append({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "See nothere.py:412."}]}})
+        self.entries.append({"type": "user", "origin": {"kind": "task-notification"}, "message": {"role": "user", "content": "<task-notification>done</task-notification>"}})
+        self.entries.append({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "The background run also passed."}]}})
+        sess, texts = self.session()
+        from sourcemark.hooks import _last_turn_texts
+
+        self.assertEqual(len(_last_turn_texts(texts, sess.text_turns)), 2)
+
+    def test_edit_context_lines_are_not_seen(self):
+        p = self.file("svc.py", [f"line{i}" for i in range(1, 12)])
+        patch = [{"oldStart": 4, "newStart": 4, "lines": [" line4", " line5", " line6", "-line7", "+line7b", " line8", " line9"]}]
+        self.tool("Edit", {"file_path": p, "old_string": "line7", "new_string": "line7b"}, {"filePath": p, "structuredPatch": patch}, "updated successfully")
+        self.assertEqual(self.v(f"{p}:4 and {p}:7"), ["unread_lines", "verified"])
+
+    def test_self_sourced_urls(self):
+        self.tool("TodoWrite", {"todos": [{"content": "read https://docs.invented.dev/v9/limits"}]}, {"newTodos": [{"content": "read https://docs.invented.dev/v9/limits"}]}, "ok")
+        self.bash('echo "see https://docs.invented.dev/v9/quotas"', "see https://docs.invented.dev/v9/quotas\n")
+        self.bash('echo "TODO: gh pr view 4242 --repo acme/app"', "TODO: gh pr view 4242 --repo acme/app\n")
+        self.bash("gh pr view 999 --repo acme/app 2>/dev/null || true", "")
+        self.bash('M=$(timeout 30 gh pr view 77 --repo acme/app --json state -q .state); echo "77=$M"', "77=MERGED\n")
+        got = self.v("https://docs.invented.dev/v9/limits https://docs.invented.dev/v9/quotas https://github.com/acme/app/pull/4242 https://github.com/acme/app/pull/999 https://github.com/acme/app/pull/77")
+        self.assertEqual(got, ["url_unsourced"] * 4 + ["url_verified"])
+
+    def test_read_past_the_end_is_not_a_read(self):
+        p = self.file("b.py", ["a", "b", "c"])
+        self.tool("Read", {"file_path": p, "offset": 50}, {"type": "text", "file": {"filePath": p, "content": "", "startLine": 50, "numLines": 0, "totalLines": 3}}, "")
+        self.assertNotEqual(self.v(f"{p}:50"), ["verified"])
+
+    def test_realistic_commands_are_not_false_fails(self):
+        self.file("a.py", [f"l{i}" for i in range(1, 6)] + ["def secret_beta():", "    pass"])
+        for cmd, out in (("grep -n --color secret_beta a.py", "6:def secret_beta():\n"),
+                         ("sed -n 1,7p a.py 2>/dev/null", "l1\nl2\nl3\nl4\nl5\ndef secret_beta():\n    pass\n")):
+            self.entries = []
+            self.bash(cmd, out)
+            self.assertEqual(self.v("a.py:6 has `def secret_beta():`"), ["verified"], cmd)
+
+
+class AdversarialRound3DelegatedTokenTest(unittest.TestCase):
+    def test_relayed_citation_gets_quote_and_coverage_checks(self):
+        s = Session(cwd="/w")
+        s.add(Observation(path="/w/svc.py", line_start=1, lines=["A = 1", "B = 2", "TIMEOUT = 30"], tool="Read", delegated=True))
+        v = lambda t: check_text(t, s).checks[0].verdict
+        self.assertEqual(v("`TIMEOUT = 999` (/w/svc.py:3)"), "quote_mismatch")
+        self.assertEqual(v("/w/svc.py:1-10"), "partial")
+        self.assertEqual(v("`TIMEOUT = 30` (/w/svc.py:3)"), "delegated")
+
+    def test_check_command_fails_an_unknown_token_without_a_ledger(self):
+        import contextlib
+        import io
+
+        from sourcemark.cli import main
+
+        d = tempfile.mkdtemp(prefix="sm-tok-")
+        self.addCleanup(shutil.rmtree, d, True)
+        t = os.path.join(d, "s.jsonl")
+        with open(t, "w") as fh:
+            fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "per [sm:zzzzzzzzzz]"}]}}) + "\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["--ledger", os.path.join(d, "none.db"), "check", t]), 1)

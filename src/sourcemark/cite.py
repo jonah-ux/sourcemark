@@ -101,7 +101,8 @@ def extract(
                 if free(m.start(), m.end()):
                     u = m.group("url") if rx is _MD_URL else m.group(0).rstrip(".,;:!?*")
                     end = m.end() if rx is _MD_URL else m.start() + len(u)
-                    taken.append((m.start(), end))
+                    # In [svc.py:4](https://…#L4) the label is a citation too: leave it free.
+                    taken.append((m.start("url") - 1 if rx is _MD_URL else m.start(), end))
                     if "\u2026" in u or "..." in u:
                         continue  # an elided link ("https://github.com/…") names no page
                     if not valid_url(u):
