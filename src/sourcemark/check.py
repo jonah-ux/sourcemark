@@ -28,7 +28,9 @@ from .observe import Session, normalize_url
 from .textnorm import squash
 
 PASSING = {"verified", "file_only", "url_verified"}
-_CODEISH = re.compile(r"[()=_./:\[\]{}<>]|\w+\(")
+# Only code EXPRESSIONS are checked as quotes. A bare identifier or dotted name
+# (`content_hash`, `c.text`) is usually a reference to a concept, not a quotation.
+_CODEISH = re.compile(r"\s|[()=\[\]{}<>;,'\"+*]|->|=>")
 
 
 @dataclass
@@ -90,7 +92,10 @@ def _match_path(cited: str, session: Session, lines: set[int] | None = None) -> 
             if os.path.realpath(p) == real:
                 return p
         return None
-    rel = os.path.normpath(cited_x.lstrip("./")) if not cited_x.startswith("..") else os.path.normpath(cited_x)
+    rel = cited_x
+    while rel.startswith("./"):
+        rel = rel[2:]  # drop a leading "./" prefix (lstrip would also eat ".claude" -> "claude")
+    rel = os.path.normpath(rel)
     if session.cwd:
         joined = os.path.normpath(os.path.join(session.cwd, cited_x))
         if joined in observed:
@@ -218,7 +223,10 @@ def check_citation(c: Citation, session: Session, *, now: bool = False) -> Citat
             if not _CODEISH.search(q):
                 continue
             out.quotes_checked += 1
-            if squash(q) in hay:
+            # "foo(...)" / "a … b": the agent elided text; every remaining fragment must be present.
+            parts = [squash(p) for p in re.split(r"\.\.\.|…", q)]
+            parts = [p for p in parts if len(p) >= 3]
+            if parts and all(p in hay for p in parts):
                 out.quotes_found += 1
         if out.quotes_checked and not out.quotes_found:
             out.verdict = "quote_mismatch"
