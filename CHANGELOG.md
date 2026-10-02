@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.0 — 2026-10-02
+
+Learned from failures on much larger real benchmarks: 4,691 real git-history edits from 4 repositories, and all 3,398 local agent sessions with 8,000+ injected near-miss citations. Every fix has a regression test built from the real failing shape.
+
+### Resolver: follow lines through the diff (#61, #62)
+
+When the file was clean at mark time, the mark's `git_blob` is aligned against the current file, the way git follows a line. This is used only where the text search is unsure:
+
+- **Duplicated quotes** resolve to the copy the marked line became, not the copy nearest the old line number.
+- **Edits whose surroundings also changed** resolve as `edited`; previously they were `orphaned`.
+- **An identical copy descended from a different line** is no longer taken for the cited one.
+- **Redacted marks** record their column and are found again after a move by hash, so no text is stored.
+- **Unique short lines** whose neighbour was edited stay found.
+
+Real-history accuracy went from 98.52% to 99.53%, with unchanged lines at 100%. The mutation benchmark rose from 96.7% to 97.3% (seed 1) and from 96.6% to 97.4% (seed 2).
+
+### Checker: evidence in real shell commands (#59, #60)
+
+- Commands are split on quote-aware separators, so a grep pattern containing `&&` stays one argument.
+- Each line of a multi-line script is a command, and heredoc bodies are skipped.
+- Greps fenced by `echo` markers are attributed.
+- `timeout`, `env`, `nice`, `time` and `stdbuf` wrappers are unwrapped.
+- A leading `cd DIR` followed by a newline is followed.
+- `~` is expanded before the cwd join, which fixes `<cwd>/~/…` paths.
+- Dotfile citations (`.gitignore:7`) are extracted.
+
+On real sessions, false flags stayed at 0.00% and every near-miss injection kind is still caught at 100%.
+
 ## 0.1.0 — 2026-10-02
 
 First release.
