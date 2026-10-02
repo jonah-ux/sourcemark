@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sourcemark"
+version = "0.1.0"
+description = "Citations that survive moves and edits: anchor quotes, file lines, and database values, then prove an agent's claims against what it actually read"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Jonah Helland"}]
+keywords = ["citations", "provenance", "agents", "claude-code", "codex", "anchoring", "verification"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Utilities",
+]
+dependencies = []
+
+[project.scripts]
+sourcemark = "sourcemark.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/jonah-ux/sourcemark"
+Repository = "https://github.com/jonah-ux/sourcemark"
+Issues = "https://github.com/jonah-ux/sourcemark/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
