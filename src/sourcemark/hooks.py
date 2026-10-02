@@ -38,6 +38,28 @@ def _last_turn_texts(texts: list[tuple[str, str]], turns: list[int]) -> list[str
     return [t for (_, t), n in zip(texts, turns) if n == last]
 
 
+def _read_settled(tpath: str, tries: int = 5, wait: float = 0.2):
+    """Read the transcript; if the turn's final assistant text may not be flushed yet, re-read.
+
+    The runtime can invoke Stop hooks a moment before the last message reaches the
+    transcript file. Re-read briefly while the file is still growing.
+    """
+    size = -1
+    for i in range(tries):
+        try:
+            cur = os.path.getsize(tpath)
+        except OSError:
+            cur = -1
+        sess, texts = read_claude_transcript(tpath)
+        turn_texts = _last_turn_texts(texts, sess.text_turns)
+        if turn_texts and cur == size:
+            break
+        size = cur
+        if i < tries - 1:
+            time.sleep(wait)
+    return sess, texts, turn_texts
+
+
 def summarize(rep: Report) -> str:
     bad = [c for c in rep.checks if c.verdict in FAILING]
     head = f"sourcemark: {rep.total} citation(s), {rep.passing} backed by this session"
@@ -57,16 +79,17 @@ def stop(payload: dict[str, Any], mode: str | None = None, ledger_path: str | No
     if not tpath or not os.path.isfile(tpath):
         return None
     t0 = time.perf_counter()
-    sess, texts = read_claude_transcript(tpath)
+    sess, texts, turn_texts = _read_settled(tpath)
     rep = Report()
-    for t in _last_turn_texts(texts, sess.text_turns):
+    for t in turn_texts:
         rep.checks.extend(check_text(t, sess).checks)
     elapsed = (time.perf_counter() - t0) * 1000
     try:
         with Ledger(ledger_path) as led:
             led.append(
                 "check",
-                {"mode": mode, "elapsed_ms": round(elapsed, 1), **rep.to_dict()},
+                {"mode": mode, "elapsed_ms": round(elapsed, 1), "payload_keys": sorted(payload),
+                 "turn_texts": len(turn_texts), **rep.to_dict()},
                 session=payload.get("session_id"),
             )
     except Exception:  # the ledger must never break the agent
