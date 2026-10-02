@@ -8,7 +8,7 @@
     },
     {
       "path": "src/sourcemark/hooks.py",
-      "sha256": "7386e28c499eb0a561da0cdfe201e34f6eaee0dc9b44358eb0a64eea5c5d20fd"
+      "sha256": "10d8a4d1d3ce5495296d7c60f5f518ef41cb5cc7a00ea726a1b8c78b5ad2de20"
     },
     {
       "path": "tests/test_ledger_hooks.py",
@@ -20,10 +20,9 @@
   ],
   "why_trace": {
     "verdict": "GENUINE_BUG",
-    "root_cause": "A second independent adversarial review showed the Stop hook ignored the global --ledger flag (writing to the default home ledger) and that one ambiguous token aborted the whole check through the fail-open path.",
+    "root_cause": "The Stop hook stored each check event (raw cited URLs, paths and quotes) in the ledger without redaction, so a Slack webhook path or ?api_key= value in a citation was persisted in plain text.",
     "evidence": [
-      "tests/test_ledger_hooks.py HookLedgerFlagTest runs python -m sourcemark --ledger X hook stop and asserts nothing is written to the default home",
-      "tests/test_check.py AdversarialRound2CheckTest.test_ambiguous_token_is_unknown_not_a_crash"
+      "tests/test_resolve.py RedactionRound2Test.test_hook_check_event_is_redacted writes a check event and asserts neither secret appears in events.payload"
     ]
   },
   "documentation": [
@@ -31,5 +30,5 @@
     "src/sourcemark/ledger.py",
     "src/sourcemark/hooks.py"
   ],
-  "source_commit": "f63795b14dec57b6a058d2cfb48832a7c08b0605"
+  "source_commit": "68c2aac6bb68b06d25e802291639a9f2b3363807"
 }
