@@ -572,6 +572,45 @@ def _drop_redirects(argv: list[str]) -> list[str]:
     return out
 
 
+# Filters that only select whole lines: a numbered line passes through them unchanged.
+_LINE_FILTER = re.compile(
+    r"^(?:sed\s+-n\s+['\"]?\d+(?:,\d+)?p(?:;\d+(?:,\d+)?p)*['\"]?|head(?:\s+-n)?(?:\s+-?\d+)?|tail(?:\s+-n)?(?:\s+-?\+?\d+)?|"
+    r"(?:grep|rg)(?:\s+-(?![\w-]*[onbcABC])[\w-]+)*\s+(?:'[^']*'|\"[^\"]*\"|\S+))$"
+)
+_NUMBERED_LINE = re.compile(r"^\s*(\d+)\t(.*)$")
+
+
+def _self_numbered(seg: str, cwd: str | None) -> str | None:
+    """The file of ``nl -ba F | sed -n 'A,Bp'`` / ``cat -n F | head``: commands whose output lines
+    carry their own line numbers, so where the slice starts does not matter."""
+    parts = [x.strip() for x in _split_unquoted(seg, pipes=True)]
+    try:
+        argv = _drop_redirects(shlex.split(parts[0]))
+    except ValueError:
+        return None
+    if not argv:
+        return None
+    cmd, args = os.path.basename(argv[0]), argv[1:]
+    files = [a for a in args if not a.startswith("-")]
+    if cmd == "nl":
+        flags = [a for a in args if a.startswith("-")]
+        ok = all(re.fullmatch(r"-b(?:a)?|-w\d*|-n(?:ln|rn|rz)?", f) for f in flags)
+        files = [a for a in files if a not in ("a", "ln", "rn", "rz") and not a.isdigit()]
+    elif cmd == "cat":
+        ok = args[:1] == ["-n"] or args[:1] == ["-bn"]
+        ok = ok and all(a in ("-n",) for a in args if a.startswith("-"))
+    else:
+        return None
+    if not ok or len(files) != 1 or not all(_LINE_FILTER.match(x) for x in parts[1:]):
+        return None
+    path = os.path.expanduser(files[0])
+    return os.path.normpath(path if os.path.isabs(path) or not cwd else os.path.join(cwd, path))
+
+
+def _numbered_lines(text: str) -> list[tuple[int, str]]:
+    return [(int(m.group(1)), m.group(2)) for m in map(_NUMBERED_LINE.match, text.split("\n")) if m]
+
+
 def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None) -> list[Observation]:
     """Recognize simple file-printing commands whose stdout is a known file slice."""
     out: list[Observation] = []
@@ -597,7 +636,12 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
                     return _grep_evidence(gargv, "\n".join(chunk) + "\n", cwd, at, alone=True)
         return _grep_evidence(gargv, stdout, cwd, at, alone=len(loud) == 1, other_printers=len(printers) > 1)
 
+    numbered: dict[int, str] = {}  # segment -> file, for self-numbered printers (nl -ba, cat -n)
     for k, seg in enumerate(segments):
+        nfile = _self_numbered(seg, cwd)
+        if nfile is not None:
+            numbered[k] = nfile
+            continue
         pipe = _unquoted_pipe(seg)
         if pipe is not None:
             first = seg[:pipe].strip()
@@ -657,6 +701,8 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
             lines = [re.sub(r"^\s*\d+\t", "", x) for x in lines]
         out.append(Observation(os.path.normpath(path), start, lines, "Bash", at))
         owner[len(out) - 1] = k
+    if numbered and stdout.strip():
+        extra.extend(_numbered_evidence(numbered, segments, loud, stdout, at))
     if len(out) > 1 or (out and len(loud) > 1):
         split = _split_by_echo_markers(segments, stdout, {owner[i]: o for i, o in enumerate(out)})
         if split is not None:
@@ -797,6 +843,46 @@ def _file_level_mentions(segments: list[str], cwd: str | None, at: str | None) -
                 if os.path.isabs(p) and _isfile(p):
                     out.append(Observation(os.path.normpath(p), 0, [], "Bash-touch", at, line_numbers=[]))
     return out
+
+
+def _numbered_evidence(numbered: dict[int, str], segments: list[str], loud: list[str], stdout: str, at: str | None) -> list[Observation]:
+    """Attribute self-numbered lines to their files. Alone in stdout: all of them. Fenced by echo
+    markers: the fence's lines. Several in one stdout: split where the numbering restarts, but only
+    if the restarts match the commands one for one (and nothing else prints numbered lines).
+    Anything else: file-level."""
+    def obs(path: str, pairs: list[tuple[int, str]]) -> Observation:
+        return Observation(path, 0, [t for _, t in pairs], "Bash", at, line_numbers=[n for n, _ in pairs])
+
+    touch = [Observation(p, 0, [], "Bash-touch", at, line_numbers=[]) for p in numbered.values()]
+    if len(loud) == 1 and len(numbered) == 1:
+        (path,) = numbered.values()
+        pairs = _numbered_lines(stdout)
+        return [obs(path, pairs)] if pairs else touch
+    chunks = _echo_chunks(segments, stdout)
+    if chunks is not None:
+        res = []
+        for segs, chunk in chunks:
+            if len(segs) == 1 and segs[0] in numbered:
+                pairs = _numbered_lines("\n".join(chunk))
+                if pairs:
+                    res.append(obs(numbered[segs[0]], pairs))
+        return res + touch
+    others = [x for x in loud if not re.match(r"(?:echo|printf)\b", x) and x not in {segments[k] for k in numbered}]
+    pairs = _numbered_lines(stdout)
+    if others or not pairs:
+        return touch
+    if len(set(numbered.values())) == 1:
+        # Several slices of ONE file: every numbered line is that file's, wherever the runs break.
+        return [obs(next(iter(numbered.values())), pairs)] + touch
+    runs: list[list[tuple[int, str]]] = [[pairs[0]]]
+    for prev, cur in zip(pairs, pairs[1:]):
+        if cur[0] <= prev[0]:
+            runs.append([])
+        runs[-1].append(cur)
+    order = [numbered[k] for k in sorted(numbered)]
+    if len(runs) != len(order):
+        return touch  # a range that continues past the previous one hides a boundary
+    return [obs(p, r) for p, r in zip(order, runs)] + touch
 
 
 def _echo_chunks(segments: list[str], stdout: str) -> list[tuple[list[int], list[str]]] | None:
@@ -1084,6 +1170,135 @@ def codex_exec_cell(code: str) -> tuple[dict[str, Any], str] | None:
     return None
 
 
+_JS_CONST = re.compile(r"\b(?:const|let|var)\s+(\w+)\s*=\s*(" + _JS_LIT + r")\s*[;\n]")
+_JS_OBJ = re.compile(r"\{((?:[^{}`\"']|" + _JS_LIT + r")*\bcmd\s*:(?:[^{}`\"']|" + _JS_LIT + r")*)\}")
+_JS_PAIR_ID = re.compile(rf"\s*(?:\"(\w+)\"|'(\w+)'|(\w+))\s*:\s*({_JS_LIT}|-?\d+(?:\.\d+)?|true|false|null|[A-Za-z_]\w*)\s*,?")
+
+
+def codex_batch_commands(code: str) -> list[dict[str, Any]]:
+    """Literal exec_command argument objects in a cell that runs several commands (a list mapped
+    over, Promise.all). Values may be literals or simple ``const NAME = "..."`` constants."""
+    consts = {m.group(1): _js_string(m.group(2)) for m in _JS_CONST.finditer(code)}
+    found = []
+    for m in _JS_OBJ.finditer(code):
+        obj, pos, args = m.group(1), 0, {}
+        while pos < len(obj.rstrip()):
+            pm = _JS_PAIR_ID.match(obj, pos)
+            if not pm or pm.end() == pos:
+                args = {}
+                break
+            key, val = pm.group(1) or pm.group(2) or pm.group(3), pm.group(4)
+            if val[0] in "\"'`":
+                args[key] = _js_string(val)
+            elif re.fullmatch(r"[A-Za-z_]\w*", val) and val not in ("true", "false", "null"):
+                args[key] = consts.get(val)  # None when not a simple constant
+            else:
+                args[key] = val
+            pos = pm.end()
+        if isinstance(args.get("cmd"), str):
+            found.append(args)
+    return found
+
+
+def _strings_of(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings_of(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _strings_of(v)]
+    return []
+
+
+def _batch_grep_evidence(code: str, out_text: str, cwd: str | None, at: str | None) -> list[Observation]:
+    """A cell that ran several commands printed their outputs together in its own format. Only
+    self-describing lines are attributed: ``path:N:text`` hits of a multi-file grep in the cell,
+    kept when the path is under that grep's roots and the text matches its pattern."""
+    try:
+        parsed = json.loads(out_text)
+        text = "\n".join(_strings_of(parsed))
+    except ValueError:
+        text = out_text
+    res: list[Observation] = []
+    for args in codex_batch_commands(code):
+        wd = args.get("workdir") if isinstance(args.get("workdir"), str) else None
+        ecwd = os.path.join(cwd, wd) if wd and cwd and not os.path.isabs(wd) else (wd or cwd)
+        cmd = expand_assignments(args["cmd"])
+        ecwd = effective_cwd(cmd, ecwd)
+        for seg in _split_unquoted(_CD.sub("", cmd, count=1), newlines=True):
+            seg = _unwrap(seg)
+            pipe = _unquoted_pipe(seg)
+            first = seg[:pipe].strip() if pipe is not None else seg
+            if not first.startswith(("rg ", "grep ", "git grep ")):
+                continue
+            try:
+                argv = _drop_redirects(shlex.split(first))
+            except ValueError:
+                continue
+            if argv[:2] == ["git", "grep"]:
+                argv = ["git-grep", *argv[2:]]
+            elif _single_target(argv[1:], ecwd, os.path.basename(argv[0])) and "-H" not in argv and "--with-filename" not in argv:
+                continue  # a one-file grep prints bare "N:text": not self-describing
+            got = _grep_evidence(argv, text, ecwd, at, alone=False)
+            res.extend(o for o in got or [] if o.line_numbers)
+    return res
+
+
+_CUT_HEADER = re.compile(r"^Warning: truncated output[^\n]*\n(?:Total output lines:[^\n]*\n)?\n?")
+_CUT_MARK = re.compile(r"…\d+ tokens truncated…")
+
+
+def _codex_uncut(stdout: str) -> tuple[bool, str]:
+    """(was the output cut, the output without Codex's cut banner and the one line that holds
+    the cut mark, which joins a head fragment to a tail fragment)."""
+    cut = False
+    while True:
+        m = _CUT_HEADER.match(stdout)
+        if not m:
+            break
+        stdout, cut = stdout[m.end() :], True
+    if _CUT_MARK.search(stdout):
+        cut = True
+        stdout = "\n".join(x for x in stdout.split("\n") if not _CUT_MARK.search(x))
+    return cut, stdout
+
+
+_JS_LABELLED = re.compile(r"\[\s*(" + _JS_LIT + r")\s*,\s*(" + _JS_LIT + r")\s*(?:,[^\]\[]*)?\]")
+
+
+def _labelled_batch_evidence(code: str, text: str, cwd: str | None, at: str | None) -> list[Observation]:
+    """``const commands = [["label", "nl -ba f | sed -n '1,9p'"], ...]`` run in a loop that prints
+    each label before its output. When every label is distinctive and occurs on exactly one
+    output line, in order, the lines between two labels are that command's output. Only lines
+    that carry their own numbers are kept: the cell may print extra text around each output."""
+    pairs = [(_js_string(a), _js_string(b)) for a, b in _JS_LABELLED.findall(code)]
+    pairs = [(a, b) for a, b in pairs if a and b]
+    if len(pairs) < 2 or any(len(a.strip()) < 4 for a, _ in pairs):
+        return []
+    consts = {m.group(1): _js_string(m.group(2)) for m in _JS_CONST.finditer(code)}
+    wd_m = re.search(r"workdir\s*:\s*(" + _JS_LIT + r"|[A-Za-z_]\w*)", code)
+    wd = None
+    if wd_m:
+        wd = _js_string(wd_m.group(1)) if wd_m.group(1)[0] in "\"'`" else consts.get(wd_m.group(1))
+    ecwd = os.path.join(cwd, wd) if wd and cwd and not os.path.isabs(wd) else (wd or cwd)
+    lines = text.split("\n")
+    bounds, pos = [], 0
+    for label, _ in pairs:
+        hits = [i for i, x in enumerate(lines) if label in x]
+        if len(hits) != 1 or hits[0] < pos:
+            return []  # a label that is missing, repeated, or out of order: no split
+        bounds.append(hits[0])
+        pos = hits[0] + 1
+    res: list[Observation] = []
+    for (label, cmd), start, end in zip(pairs, bounds, [*bounds[1:], len(lines)]):
+        chunk = "\n".join(lines[start + 1 : end]) + "\n"
+        cmd = expand_assignments(cmd)
+        for o in from_shell(_CD.sub("", cmd, count=1), chunk, effective_cwd(cmd, ecwd), at):
+            if o.line_numbers:
+                res.append(o)
+    return res
+
+
 def _codex_text(out: Any) -> str:
     """Codex splits one output into parts ("...Output:\\n", then the stdout): concatenate them as
     they are. Joining with newlines would insert a line and shift every line number by one."""
@@ -1150,7 +1365,13 @@ def read_codex_transcript(path: str) -> tuple[Session, list[tuple[str, str]]]:
                 sess.urls |= urls_in(text) - urls_in(code)  # `echo https://x` returns what was typed
                 cell = codex_exec_cell(code)
                 stdout = _codex_output(out)
-                if cell is None or stdout is None:
+                if stdout is None:
+                    continue
+                if cell is None:
+                    if "tools.exec_command" in code:
+                        _cut, uncut = _codex_uncut(stdout)
+                        for o in _batch_grep_evidence(code, uncut, cwd, at) + _labelled_batch_evidence(code, uncut, cwd, at):
+                            sess.add(o)
                     continue
                 args, form = cell
                 exit_code = 0
@@ -1166,12 +1387,17 @@ def read_codex_transcript(path: str) -> tuple[Session, list[tuple[str, str]]]:
                 wd = args.get("workdir") if isinstance(args.get("workdir"), str) else None
                 ecwd = os.path.join(cwd, wd) if wd and cwd and not os.path.isabs(wd) else (wd or cwd)
                 sess.urls |= gh_refs(cmd, stdout)
-                if exit_code or stdout.startswith("Warning: truncated output") or "tokens truncated" in stdout:
-                    # Failed or cut down: the printed lines cannot be placed. File-level only.
+                if exit_code:
+                    # Failed: the printed lines cannot be trusted as the file. File-level only.
                     for o in from_shell_touches(cmd, effective_cwd(cmd, ecwd), set(), at):
                         sess.add(o)
                     continue
+                cut, stdout = _codex_uncut(stdout)
                 for o in observe_tool("Bash", {"command": cmd}, {"stdout": stdout}, "", ecwd, at):
+                    if cut and o.line_numbers is None and o.lines:
+                        # The middle was cut: lines placed by counting would be misplaced. Keep
+                        # only lines that carry their own numbers (grep hits, nl / cat -n).
+                        o = Observation(o.path, 0, [], "Bash-touch", o.at, line_numbers=[])
                     sess.add(o)
     return sess, texts
 
