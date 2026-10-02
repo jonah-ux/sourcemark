@@ -365,10 +365,12 @@ def read_claude_transcript(path: str, subagents: bool = True) -> tuple[Session, 
                 e = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(e, dict):
+                continue  # a stray array or scalar line must not abort the whole check
             if e.get("cwd"):
                 sess.cwd = sess.cwd or e["cwd"]
                 sess.cwds.add(e["cwd"])
-            msg = e.get("message") or {}
+            msg = e.get("message") if isinstance(e.get("message"), dict) else {}
             content = msg.get("content")
             at = e.get("timestamp")
             if e.get("type") == "user" and not e.get("isMeta"):
