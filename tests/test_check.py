@@ -375,6 +375,13 @@ class StrictnessTest(unittest.TestCase):
         self.assertEqual(check_text("see /w/a.py:180", s).checks[0].verdict, "verified")
         self.assertEqual(check_text("see /w/a.py:400", s).checks[0].verdict, "out_of_range")
 
+    def test_url_validation_is_linear_on_junk_hosts(self):
+        import time
+        from sourcemark.cite import valid_url
+        t = time.perf_counter()
+        self.assertFalse(valid_url("https://" + "a-" * 5000 + "!"))
+        self.assertLess(time.perf_counter() - t, 0.5)
+
     def test_elided_url_is_not_a_citation(self):
         self.assertEqual(extract("pushed to https://github.com/\u2026 and https://example.com/a/.../b"), [])
 
