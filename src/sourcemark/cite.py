@@ -37,8 +37,8 @@ def valid_url(url: str) -> bool:
 
 
 _TOKEN = re.compile(r"\[sm:(?P<tok>[a-z2-7]{6,26})\]")
-_MD_URL = re.compile(r"\[(?P<label>[^\]\n]{0,200})\]\((?P<url>https?://[^)\s]+)\)")
-_BARE_URL = re.compile(r"(?<![\w])https?://[^\s)\]>`\"']+")
+_MD_URL = re.compile(r"\[(?P<label>[^\]\n]{0,200})\]\((?P<url>https?://(?:[^()\s]|\([^()\s]*\))+)\)")
+_BARE_URL = re.compile(r"(?<![\w])https?://(?:[^\s()\]>`\"']|\([^\s()\]>`\"']*\))+")
 _CODE = re.compile(r"`([^`\n]{4,200})`")
 _FENCE = re.compile(r"^(```|~~~)[^\n]*\n.*?^\1[ \t]*$", re.S | re.M)
 _TLDS = {"com", "org", "net", "io", "dev", "ai", "co", "app", "edu", "gov", "us", "uk", "de", "info", "biz", "me", "xyz"}
@@ -99,7 +99,7 @@ def extract(
         for rx in (_MD_URL, _BARE_URL):
             for m in rx.finditer(text):
                 if free(m.start(), m.end()):
-                    u = m.group("url") if rx is _MD_URL else m.group(0).rstrip(".,;:!?*_")
+                    u = m.group("url") if rx is _MD_URL else m.group(0).rstrip(".,;:!?*")
                     end = m.end() if rx is _MD_URL else m.start() + len(u)
                     taken.append((m.start(), end))
                     if "\u2026" in u or "..." in u:

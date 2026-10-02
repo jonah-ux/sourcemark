@@ -612,3 +612,38 @@ class AdversarialRound2CheckTest(unittest.TestCase):
 
         r = check_text("see [sm:abcdef] and /etc/never_read_file.conf:12", Session(cwd=self.d), ledger=Amb())
         self.assertEqual([c.verdict for c in r.checks][0], "unknown_token")
+
+
+class AdversarialRound2UrlTest(unittest.TestCase):
+    def tx(self, entries):
+        d = tempfile.mkdtemp(prefix="sm-url2-")
+        self.addCleanup(shutil.rmtree, d, True)
+        t = os.path.join(d, "s.jsonl")
+        with open(t, "w") as fh:
+            fh.write("".join(json.dumps(e) + "\n" for e in entries))
+        return read_claude_transcript(t)[0]
+
+    def tool(self, name, tin, result, tid="t1"):
+        return [
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": tid, "name": name, "input": tin}]}},
+            {"type": "user", "toolUseResult": result, "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": json.dumps(result)}]}},
+        ]
+
+    def v(self, s, text):
+        return check_text(text, s).checks[0].verdict
+
+    def test_link_in_the_agents_own_write_is_not_sourced(self):
+        s = self.tx(self.tool("Write", {"file_path": "/tmp/x.md", "content": "see https://made.example/up"}, {"type": "create", "filePath": "/tmp/x.md", "content": "see https://made.example/up"}))
+        self.assertEqual(self.v(s, "per https://made.example/up"), "url_unsourced")
+
+    def test_link_from_a_subagent_report_is_delegated(self):
+        s = self.tx(self.tool("Task", {"prompt": "research"}, {"content": [{"type": "text", "text": "found https://docs.example/a"}]}))
+        self.assertEqual(self.v(s, "per https://docs.example/a"), "delegated")
+
+    def test_parenthesised_url_round_trips_and_prefix_does_not_pass(self):
+        u = "https://en.wikipedia.org/wiki/Python_(programming_language)"
+        s = self.tx(self.tool("WebFetch", {"url": u}, {"result": "Python is ..."}))
+        self.assertEqual(self.v(s, f"see [Python]({u})"), "url_verified")
+        self.assertEqual(self.v(s, f"see {u}."), "url_verified")
+        self.assertEqual(self.v(s, "see https://en.wikipedia.org/wiki/Python"), "url_unsourced")
+        self.assertEqual([c.url for c in extract(f"(see {u})")], [u])
