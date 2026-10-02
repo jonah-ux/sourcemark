@@ -18,7 +18,7 @@ from .anchor import mark_lines, mark_text
 from .check import check_text
 from .db import PsqlRunner, mark_row, resolve_row
 from .gitinfo import source_for
-from .hooks import FAILING, run_stop
+from .hooks import failing, run_stop
 from .ledger import Ledger
 from .observe import read_claude_transcript
 from .resolve import resolve
@@ -120,7 +120,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     lines = [f"{c.verdict:15} {c.raw[:100]}" + (f"  ({c.detail})" if c.detail else "") for c in rep.checks]
     lines.append(f"-- {rep.passing}/{rep.total} backed by this session")
     _out(args, rep.to_dict(), "\n".join(lines))
-    return 1 if any(c.verdict in FAILING for c in rep.checks) else 0
+    return 1 if any(c.verdict in failing() for c in rep.checks) else 0
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
