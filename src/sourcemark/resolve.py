@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import time
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable
 
@@ -28,7 +29,8 @@ STATUSES = ("intact", "shifted", "moved", "edited", "orphaned", "unverifiable")
 # Below this length an exact hit in an unrelated file is too likely to be a coincidence
 # unless the surrounding context also agrees.
 SHORT_QUOTE = 24
-MIN_CONTEXT_FOR_SHORT = 0.6
+MIN_CONTEXT_FOR_SHORT = 0.5
+OTHER_FILE_DISTINCTIVE = 48
 MAX_SEARCH_FILES = 50
 
 
@@ -56,7 +58,7 @@ class Resolution:
 def _read(path: str) -> str | None:
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
-            return normalize_newlines(fh.read())
+            return unicodedata.normalize("NFC", normalize_newlines(fh.read()))
     except (OSError, ValueError):
         return None
 
@@ -128,6 +130,12 @@ def search_roots(roots: Iterable[str], exact: str, exclude: set[str]) -> list[st
     return ranked[:MAX_SEARCH_FILES]
 
 
+def _ctx_worst(doc: str, m: Match, mark: Mark) -> float:
+    from .locate import _context_score
+
+    return _context_score(doc, m.start, m.end, mark.quote.get("prefix") or "", mark.quote.get("suffix") or "", worst=True)
+
+
 def _classify(mark: Mark, path: str, m: Match, original_path: str, line_start: int) -> tuple[str, bool]:
     """Status is line-based: humans and git both count lines, not characters."""
     moved = os.path.abspath(path) != os.path.abspath(original_path)
@@ -189,9 +197,13 @@ def resolve(
             )
         if m is None:
             return False
-        if path != original and exact is not None and len(exact) < SHORT_QUOTE:
-            if m.context_score < MIN_CONTEXT_FOR_SHORT:
-                res.notes.append(f"rejected weak short-quote hit in {path}")
+        if path != original and exact is not None:
+            # In ANOTHER file, only a distinctive quote, or one whose surroundings also
+            # moved with it, is the same citation. Boilerplate appears in many files.
+            distinctive = len(exact.strip()) >= OTHER_FILE_DISTINCTIVE or exact.count("\n") >= 2
+            worst = _ctx_worst(doc, m, mark)
+            if not distinctive and worst < MIN_CONTEXT_FOR_SHORT:
+                res.notes.append(f"rejected non-distinctive hit in {path}")
                 return False
         offs = line_offsets(doc)
         status, moved = _classify(mark, path, m, original, offset_to_line(offs, m.start))
