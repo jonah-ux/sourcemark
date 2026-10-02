@@ -395,3 +395,51 @@ class AdversarialRound3ResolveTest(unittest.TestCase):
         self.write("svc.py", get_item + "\n\n" + get_user)
         r = resolve(m, search=False)
         self.assertEqual((r.status, r.line_start), ("shifted", 9))
+
+
+class RedactionRound3Test(unittest.TestCase):
+    PW = "Hunter" + "2Hunter2xyz"
+    TOK = "AbCdEf" + "1234567890" * 4
+
+    def test_shapes_missed_in_round_two(self):
+        cases = {
+            "client_secret": f"https://oauth2.example.com/token?client_id=x&client_secret={self.PW}",
+            "refresh_token": f"https://api.example.com/t?refresh_token={self.PW}",
+            "amz": f"https://bucket.s3.amazonaws.com/k?X-Amz-Security-Token={self.PW}&X-Amz-Signature={self.PW}",
+            "telegram": "https://api.telegram.org/bot" + "123456789:" + self.TOK + "/sendMessage",
+            "redis empty user": "redis://" + ":" + self.PW + "@cache.example.com:6379",
+            "netrc": "machine api.example.com login bot pass" + "word " + self.PW,
+            "npmrc": "//registry.npmjs.org/:_auth" + "Token=" + self.PW,
+            "docker auth": '{"auths": {"r.example.com": {"auth": "' + "dXNlcjpw" + "YXNzd29yZDEyMw==" + '"}}}',
+            "commented kv": "api_" + "key = " + "3f9c8e7d6b5a4c3b2a1f0e9d8c7b6a5f  # prod",
+            "connstring apikey": "ApiKey=" + "3f9c8e7d6b5a4c3b2a1f" + ";Endpoint=https://x",
+        }
+        for name, text in cases.items():
+            self.assertTrue(find_secrets(text), name)
+
+    def test_still_readable(self):
+        for c in ["token = tokens[0]", "password reset link sent", "token: ${{ secrets.GH_TOKEN }}", "sha = " + "0123456789abcdef" * 4]:
+            self.assertFalse(find_secrets(c), c)
+
+    def test_long_lines_scan_fast(self):
+        import time
+
+        for text in ("deadbeef" * 3000, "_".join(f"api_key_token_name_{i}" for i in range(1500)), "a" * 48000):
+            t = time.perf_counter()
+            find_secrets(text)
+            self.assertLess(time.perf_counter() - t, 0.5)
+
+    def test_psql_timeout_does_not_carry_the_dsn(self):
+        import stat
+        from sourcemark.db import PsqlRunner
+
+        d = tempfile.mkdtemp(prefix="sm-psql-")
+        self.addCleanup(shutil.rmtree, d, True)
+        fake = os.path.join(d, "psql")
+        with open(fake, "w") as fh:
+            fh.write("#!/bin/sh\nsleep 5\n")
+        os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+        dsn = "postgresql://app:" + self.PW + "@db.example.com/app"
+        with self.assertRaises(RuntimeError) as cm:
+            PsqlRunner(dsn, psql=fake, timeout=0.5)("select 1")
+        self.assertNotIn(self.PW, str(cm.exception))
