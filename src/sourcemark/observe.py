@@ -53,6 +53,11 @@ class Session:
 
     def add(self, obs: Observation | None) -> None:
         if obs is not None and (obs.lines or obs.line_numbers is not None):
+            # One canonical spelling per file: "~/x", "a/../x" and "/home/u/x" must match.
+            p = os.path.expanduser(obs.path)
+            if not os.path.isabs(p) and self.cwd:
+                p = os.path.join(self.cwd, p)
+            obs.path = os.path.normpath(p)
             self.observations.append(obs)
 
     def line_evidence(self, path: str) -> list[Observation]:
