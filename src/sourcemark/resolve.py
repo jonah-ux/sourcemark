@@ -12,6 +12,7 @@ says what happened: intact, shifted, moved, edited, or orphaned.
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import shutil
@@ -22,7 +23,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable
 
 from .anchor import Mark
-from .locate import DISTINCTIVE_CHARS, EXACT_CONTEXT_MIN, Match, locate
+from .locate import DEFAULT_MIN_SIMILARITY, DISTINCTIVE_CHARS, EXACT_CONTEXT_MIN, Match, locate
 from .textnorm import fingerprint, line_offsets, normalize_newlines, offset_to_line
 
 STATUSES = ("intact", "shifted", "moved", "edited", "orphaned", "unverifiable")
@@ -64,6 +65,88 @@ class Resolution:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+# Above this many lines (old + new) the line alignment is skipped: too slow for a tie-break.
+HISTORY_ALIGN_MAX_LINES = 20000
+# Uneven hunks are paired line by line only up to this many (old x new) comparisons.
+HUNK_PAIR_MAX = 2500
+HUNK_PAIR_MIN = 0.6
+
+
+def _align(old: str, new: str) -> tuple[dict[int, int], dict[int, int], set[int]] | None:
+    """Line alignment of two versions, the way git follows lines through a diff (0-based).
+
+    Returns (kept: old->new for unchanged lines, edited: old->new for lines replaced one-for-one,
+    descended: new lines that are an unchanged old line)."""
+    a, b = old.split("\n"), new.split("\n")
+    if len(a) + len(b) > HISTORY_ALIGN_MAX_LINES:
+        return None
+    kept: dict[int, int] = {}
+    edited: dict[int, int] = {}
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if tag == "equal":
+            kept.update((i1 + k, j1 + k) for k in range(i2 - i1))
+        elif tag == "replace" and i2 - i1 == j2 - j1:
+            edited.update((i1 + k, j1 + k) for k in range(i2 - i1))
+        elif tag == "replace" and (i2 - i1) * (j2 - j1) <= HUNK_PAIR_MAX:
+            # Uneven hunk: pair each old line with its most similar later new line, in order.
+            nxt = j1
+            for i in range(i1, i2):
+                best, best_j = HUNK_PAIR_MIN, None
+                for j in range(nxt, j2):
+                    r = difflib.SequenceMatcher(None, a[i], b[j], autojunk=False).ratio()
+                    if r > best:
+                        best, best_j = r, j
+                if best_j is not None:
+                    edited[i] = best_j
+                    nxt = best_j + 1
+    return kept, edited, set(kept.values())
+
+
+def _follow_history(mark: Mark, doc: str, m: Match | None, old: str | None) -> tuple[Match | None, bool]:
+    """Re-locate a duplicated quote through the diff from the marked version (``git_blob``).
+
+    Identical copies cannot be told apart by their text, and often not by their context; the
+    diff can. Returns (match, decided): decided=False leaves ``m`` to the text search."""
+    exact = mark.quote.get("exact")
+    line = mark.position.get("line_start")
+    start = mark.position.get("start")
+    if not exact or not line or old is None or start is None:
+        return m, False
+    old = normalize_newlines(old)
+    if old[start : start + len(exact)] != exact:
+        return m, False  # the blob is not the text that was marked
+    aligned = _align(old, doc)
+    if aligned is None:
+        return m, False
+    kept, edited, descended = aligned
+    o_offs, offs = line_offsets(old), line_offsets(doc)
+    first, last = line - 1, line - 1 + exact.count("\n")
+    col = start - o_offs[first]
+    rows = [kept.get(i, edited.get(i)) for i in range(first, last + 1)]
+    if all(r is not None for r in rows) and rows == list(range(rows[0], rows[0] + len(rows))):
+        at = offs[rows[0]] + col if rows[0] < len(offs) else None
+        unchanged = all(i in kept for i in range(first, last + 1))  # an edit can keep a prefix
+        if unchanged and at is not None and doc[at : at + len(exact)] == exact:
+            if m is not None and at == m.start:
+                return m, True
+            return Match(at, at + len(exact), 1.0, "history", m.context_score if m is not None else 0.0), True
+        if any(i in edited for i in range(first, last + 1)):
+            # Edited in place: the new text of those lines, scored like a fuzzy hit.
+            s0 = offs[rows[0]]
+            s1 = offs[rows[-1] + 1] - 1 if rows[-1] + 1 < len(offs) else len(doc)
+            text = doc[s0:s1]
+            sim = difflib.SequenceMatcher(None, exact, text, autojunk=False).ratio()
+            if sim >= DEFAULT_MIN_SIMILARITY:
+                return Match(s0, s1, round(sim, 4), "history-edit", 0.0), True
+    # Our lines did not survive. An exact hit that descends from another, unchanged old line is
+    # that line's copy, not ours; anything else (a block moved within the file) stays as found.
+    if m is not None and m.similarity >= 0.999:
+        hit_line = offset_to_line(offs, m.start) - 1
+        if hit_line in descended:
+            return None, True
+    return m, False
 
 
 def _read(path: str) -> str | None:
@@ -168,10 +251,27 @@ def _classify(mark: Mark, path: str, m: Match, original_path: str, line_start: i
     return "shifted", False
 
 
-def _verify_redacted(mark: Mark, path: str, doc: str) -> Match | None:
+def _verify_redacted(mark: Mark, path: str, doc: str, old: str | None = None) -> Match | None:
+    """A redacted mark stores no text, only its hash, length and column. Verify it in place, or
+    find the one line where the same-length span at the same column has the same hash. With the
+    marked version (``old``), identical copies are told apart through the diff."""
     s, e = mark.position["start"], mark.position["end"]
-    if fingerprint(doc[s:e]) == mark.fingerprints["quote"]:
+    fp = mark.fingerprints["quote"]
+    in_place = fingerprint(doc[s:e]) == fp
+    col, n = mark.position.get("column"), e - s
+    if col is None:
+        return Match(s, e, 1.0, "position", 1.0) if in_place else None  # marked before columns were recorded
+    offs = line_offsets(doc)
+    hits = [o + col for o in offs if o + col + n <= len(doc) and fingerprint(doc[o + col : o + col + n]) == fp]
+    if len(hits) > 1 and old is not None and mark.position.get("line_start"):
+        aligned = _align(normalize_newlines(old), doc)
+        target = aligned[0].get(mark.position["line_start"] - 1) if aligned else None
+        if target is not None and target < len(offs) and offs[target] + col in hits:
+            hits = [offs[target] + col]
+    if in_place and (len(hits) != 1 or hits[0] == s):
         return Match(s, e, 1.0, "position", 1.0)
+    if len(hits) == 1:
+        return Match(hits[0], hits[0] + n, 1.0, "redacted-hash", 0.0)
     return None
 
 
@@ -205,7 +305,8 @@ def resolve(
         if doc is None:
             return False
         if exact is None:
-            m = _verify_redacted(mark, path, doc)
+            blob = src.get("git_blob") if path == original and repo_root else None
+            m = _verify_redacted(mark, path, doc, _git(repo_root, "cat-file", "-p", blob) if blob else None)
         else:
             m = locate(
                 doc,
@@ -216,6 +317,21 @@ def resolve(
                 fuzzy=allow_fuzzy,
                 unique_when_marked=mark.position.get("occurrences", 1) <= 1,
             )
+        if (
+            path == original
+            and exact is not None
+            and src.get("git_blob")
+            and repo_root
+            and (m is None or mark.position.get("occurrences", 1) > 1 or doc.count(exact) > 1)
+        ):
+            # Several identical copies: context may not tell them apart, but the diff from the
+            # marked version does. Nothing found: the diff may show the line edited in place
+            # while its surroundings changed too (which defeats the fuzzy search's context check).
+            followed, decided = _follow_history(mark, doc, m, _git(repo_root, "cat-file", "-p", src["git_blob"]))
+            if decided:
+                if followed is not m:
+                    res.notes.append("duplicated quote: followed its line through the diff from the marked blob")
+                m = followed
         if m is None:
             return False
         if searched and exact is not None:
