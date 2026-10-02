@@ -184,3 +184,34 @@ class LedgerTamperTest(unittest.TestCase):
         with Ledger(self.db) as led:
             self.assertIsNone(led.get_mark("______"))
             self.assertIsNotNone(led.get_mark(self.mark.id[4:12]))
+
+
+class CliErrorTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="sm-clierr-")
+        self.db = os.path.join(self.dir, "l.db")
+        self.f = os.path.join(self.dir, "two.txt")
+        with open(self.f, "w") as fh:
+            fh.write("one\ntwo\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def code(self, *argv):
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            return main(["--ledger", self.db, *argv]), err.getvalue()
+
+    def test_usage_errors_exit_2(self):
+        for target in (f"{self.f}:0", f"{self.f}:2-1", f"{self.f}:9"):
+            c, err = self.code("mark", target)
+            self.assertEqual(c, 2, target)
+        self.assertIn("outside 1-2", self.code("mark", f"{self.f}:9")[1])
+        self.assertEqual(self.code("check", os.path.join(self.dir, "missing.jsonl"))[0], 2)
+
+    def test_malformed_transcript_line_is_skipped(self):
+        tr = os.path.join(self.dir, "t.jsonl")
+        write_transcript(tr, self.f, f"see {self.f}:2")
+        with open(tr, "a") as fh:
+            fh.write("[1, 2, 3]\n")
+        self.assertEqual(self.code("check", tr)[0], 0)
