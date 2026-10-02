@@ -231,3 +231,72 @@ class EndpointTest(unittest.TestCase):
         for u in ("http://127.0.0.1:8080/api", "http://localhost:3000", "http://10.0.0.5/x", f"http://{shared}:11434", "http://printer.local/"):
             self.assertEqual(check_text(f"server at {u}", sess).checks[0].verdict, "endpoint", u)
         self.assertEqual(check_text("see https://example.com/docs", sess).checks[0].verdict, "url_unsourced")
+
+
+class EvidenceIntegrityTest(unittest.TestCase):
+    """Regression tests for adversarial findings: failed tool calls are never evidence."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="sm-integ-")
+        os.makedirs(os.path.join(self.d, "src"))
+        self.real = os.path.join(self.d, "src", "a.py")
+        with open(self.real, "w") as fh:
+            fh.write("".join(f"line {i}\n" for i in range(1, 21)))
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def run_calls(self, calls, answer):
+        events = []
+        for i, (name, inp, structured, content, err) in enumerate(calls):
+            events.append(tool_use(i, name, inp))
+            r = tool_result(i, structured, content)
+            if err:
+                r["message"]["content"][0]["is_error"] = True
+            events.append(r)
+        events.append(say(answer))
+        sess, texts = read_claude_transcript(transcript(self.d, self.d, events))
+        return [c.verdict for c in check_text(texts[-1][1], sess).checks]
+
+    def test_failed_read_is_not_a_read(self):
+        msg = "Error: File does not exist. Note: your current working directory is /p."
+        v = self.run_calls([("Read", {"file_path": os.path.join(self.d, "src/ghost.py")}, msg, msg, True)], "Defined at src/ghost.py:1.")
+        self.assertNotIn("verified", v)
+        v = self.run_calls([("Read", {"file_path": os.path.join(self.d, "src/ghost.py")}, msg, msg, False)], "Defined at src/ghost.py:1.")
+        self.assertNotIn("verified", v)
+
+    def test_failed_cat_is_not_a_read(self):
+        out = "Error: Exit code 1\ncat: src/ghost2.py: No such file or directory"
+        v = self.run_calls([("Bash", {"command": "cat src/ghost2.py"}, out, out, True)], "See src/ghost2.py:1.")
+        self.assertNotIn("verified", v)
+
+    def test_rejected_write_is_not_authorship(self):
+        target = os.path.join(self.d, "src", "never.py")
+        msg = "Error: The user doesn't want to proceed with this tool use."
+        v = self.run_calls([("Write", {"file_path": target, "content": "def h():\n    return 42\n"}, msg, "rejected", True)], "I added it in src/never.py:2.")
+        self.assertNotIn("verified", v)
+        ok = self.run_calls([("Write", {"file_path": target, "content": "a\nb\n"}, {"type": "create", "filePath": target}, "", False)], "I added it in src/never.py:2.")
+        self.assertEqual(ok, ["verified"])
+
+    def test_failed_heredoc_is_not_authorship(self):
+        cmd = "cat > src/denied.py <<'EOF'\nx = 1\nEOF"
+        v = self.run_calls([("Bash", {"command": cmd}, "Error: Exit code 1\npermission denied", "", True)], "Wrote src/denied.py:1.")
+        self.assertNotIn("verified", v)
+
+    def test_grep_over_a_log_is_not_a_read_of_mentioned_files(self):
+        log = os.path.join(self.d, "lint.txt")
+        with open(log, "w") as fh:
+            fh.write("src/a.py:12:5: E501 line too long\n")
+        v = self.run_calls([("Bash", {"command": "rg E501 lint.txt"}, {"stdout": "src/a.py:12:5: E501 line too long\n", "stderr": ""}, "", False)], "See src/a.py:12.")
+        self.assertNotIn("verified", v)
+
+    def test_grep_context_lines_count(self):
+        out = "src/a.py-1-line 1\nsrc/a.py:2:line 2\nsrc/a.py-3-line 3\n"
+        v = self.run_calls([("Bash", {"command": "grep -rn -C1 'line 2' src"}, {"stdout": out, "stderr": ""}, "", False)], "See src/a.py:1 and src/a.py:3.")
+        self.assertEqual(v, ["verified", "verified"])
+
+    def test_head_n_and_flagged_cat(self):
+        v = self.run_calls([("Bash", {"command": "head -n 2 src/a.py"}, {"stdout": "line 1\nline 2\n", "stderr": ""}, "", False)], "See src/a.py:2.")
+        self.assertEqual(v, ["verified"])
+        v = self.run_calls([("Bash", {"command": "cat -s src/a.py"}, {"stdout": "line 1\n", "stderr": ""}, "", False)], "See src/a.py:1.")
+        self.assertNotIn("verified", v)
