@@ -32,7 +32,8 @@ def valid_url(url: str) -> bool:
     """A real host, not a template: ``https://<node>``, ``https://{host}``, ``https://$``."""
     m = re.match(r"https?://([^/?#]*)", url)
     host = m.group(1).rsplit("@", 1)[-1] if m else ""
-    return bool(re.fullmatch(r"(?:[A-Za-z0-9\-]+\.?)+(?::\d+)?|\[[0-9A-Fa-f:.]+\](?::\d+)?", host))
+    # Flat character classes only: nested quantifiers here backtrack exponentially on long junk.
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.\-]*(?::\d{1,5})?|\[[0-9A-Fa-f:.]+\](?::\d{1,5})?", host))
 
 
 _TOKEN = re.compile(r"\[sm:(?P<tok>[a-z2-7]{6,26})\]")
