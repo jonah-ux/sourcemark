@@ -43,3 +43,4 @@ jobs:
           python -m pip install --no-deps dist/*.whl
           sourcemark --version
           sourcemark --help
+          python demos/demo.py
