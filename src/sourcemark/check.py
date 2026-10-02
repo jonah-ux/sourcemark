@@ -14,6 +14,7 @@ Verdicts (per citation):
 * ``unknown_token``  an ``[sm:…]`` token that is not in the provided marks
 * ``url_verified``   a link the session fetched or got back from a search
 * ``url_unsourced``  a link that never appeared in any fetch/search this session
+* ``delegated``      only a subagent read it; the citation is relayed, not first-hand
 """
 
 from __future__ import annotations
@@ -153,6 +154,29 @@ def _file_lines(path: str) -> list[str] | None:
         return None
 
 
+def _judge_lines(c: Citation, obs: list, out: CitationCheck) -> str:
+    """Line-coverage verdict for a citation against a set of observations of one file."""
+    covered: set[int] = set()
+    total = None
+    for o in obs:
+        covered |= o.covered()
+        total = o.total_lines or total
+    cited = set(range(c.line_start, (c.line_end or c.line_start) + 1))
+    out.lines_cited = len(cited)
+    out.lines_read = len(cited & covered)
+    if total is not None and c.line_start > total:
+        out.detail = f"file had {total} lines when read"
+        return "out_of_range"
+    if out.lines_read == len(cited):
+        return "verified"
+    if out.lines_read:
+        return "partial"
+    near = sorted(covered, key=lambda n: abs(n - c.line_start))[:1]
+    if near:
+        out.detail = f"nearest line read: {near[0]}"
+    return "unread_lines"
+
+
 def check_citation(c: Citation, session: Session, *, now: bool = False) -> CitationCheck:
     out = CitationCheck(raw=c.raw, verdict="nonexistent", path=c.path, line_start=c.line_start, line_end=c.line_end)
     if c.token:
@@ -161,8 +185,13 @@ def check_citation(c: Citation, session: Session, *, now: bool = False) -> Citat
     if c.url:
         u = normalize_url(c.url)
         out.path = c.url
-        if u in session.urls or any(s.startswith(u + "/") or u.startswith(s + "/") for s in session.urls):
+        def seen(urls: set[str]) -> bool:
+            return u in urls or any(s.startswith(u + "/") or u.startswith(s + "/") for s in urls)
+
+        if seen(session.urls):
             out.verdict = "url_verified"
+        elif seen(session.delegated_urls):
+            out.verdict, out.detail = "delegated", "only a subagent fetched this link"
         else:
             out.verdict = "url_unsourced"
             out.detail = "link never fetched or returned by a search in this session"
@@ -184,31 +213,31 @@ def check_citation(c: Citation, session: Session, *, now: bool = False) -> Citat
                     out.detail = f"file has {len(lines)} lines and was never read"
         return out
     out.resolved_path = hit
-    obs = session.for_path(hit)
+    all_obs = session.for_path(hit)
+    obs = [o for o in all_obs if not o.delegated]
+    if not obs:
+        # Only subagents touched this file: judge the citation on their evidence, then label it.
+        sub = _judge_lines(c, all_obs, out) if c.line_start is not None else "file_only"
+        if sub in ("verified", "partial", "file_only"):
+            out.verdict, out.detail = "delegated", "only a subagent read this; the orchestrator relayed it"
+        else:
+            out.verdict = sub
+        return out
     if c.line_start is None:
         out.verdict = "file_only"
         return out
 
-    covered: set[int] = set()
-    total = None
-    for o in obs:
-        covered |= o.covered()
-        total = o.total_lines or total
-    cited = set(range(c.line_start, (c.line_end or c.line_start) + 1))
-    out.lines_cited = len(cited)
-    out.lines_read = len(cited & covered)
-    if total is not None and c.line_start > total:
-        out.verdict, out.detail = "out_of_range", f"file had {total} lines when read"
+    out.verdict = _judge_lines(c, obs, out)
+    if out.verdict == "out_of_range":
         return out
-    if out.lines_read == len(cited):
-        out.verdict = "verified"
-    elif out.lines_read:
-        out.verdict = "partial"
-    else:
-        out.verdict = "unread_lines"
-        near = sorted(covered, key=lambda n: abs(n - c.line_start))[:1]
-        if near:
-            out.detail = f"nearest line read: {near[0]}"
+    if out.verdict in ("unread_lines", "partial"):
+        # The agent's own reads fall short; did a subagent read exactly these lines?
+        deleg = [o for o in all_obs if o.delegated]
+        if deleg:
+            probe = CitationCheck(raw=c.raw, verdict="")
+            if _judge_lines(c, obs + deleg, probe) == "verified":
+                out.verdict, out.detail = "delegated", "only a subagent read these lines; the orchestrator relayed them"
+                return out
 
     # Quote check: code-like quotes next to the citation must appear in the lines read.
     if out.verdict in ("verified", "partial") and c.claimed_quotes:
