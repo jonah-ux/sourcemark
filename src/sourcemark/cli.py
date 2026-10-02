@@ -16,6 +16,7 @@ from typing import Any
 from . import __version__
 from .anchor import mark_lines, mark_text
 from .check import check_text
+from .db import PsqlRunner, mark_row, resolve_row
 from .gitinfo import source_for
 from .hooks import FAILING, run_stop
 from .ledger import Ledger
@@ -55,12 +56,31 @@ def cmd_mark(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mark_row(args: argparse.Namespace) -> int:
+    run = PsqlRunner(args.dsn)
+    schema, _, table = args.table.rpartition(".")
+    pk: object = args.pk
+    if "=" in args.pk:
+        pk = dict(kv.split("=", 1) for kv in args.pk.split(","))
+    mark = mark_row(run, table, pk, args.columns, schema=schema or "public", database=args.database)
+    with Ledger(args.ledger) as led:
+        led.put_mark(mark)
+    _out(args, mark.to_dict(), f"{mark.token}  {args.database}:{schema or 'public'}.{table} {mark.source['pk']} {','.join(args.columns)}")
+    return 0
+
+
 def cmd_resolve(args: argparse.Namespace) -> int:
     with Ledger(args.ledger) as led:
         mark = led.get_mark(args.ref)
         if mark is None:
             print(f"sourcemark: unknown mark {args.ref}", file=sys.stderr)
             return 2
+        if mark.kind == "db":
+            dres = resolve_row(mark, PsqlRunner(args.dsn))
+            led.append("resolve", dres.to_dict())
+            extra = f" changed: {', '.join(dres.changed)}" if dres.changed else ""
+            _out(args, dres.to_dict(), f"{dres.status:10}{extra}  ({dres.elapsed_ms:.1f} ms)")
+            return 0 if dres.status == "intact" else 1
         res = resolve(mark, roots=args.root or [])
         led.append("resolve", res.to_dict())
     where = f"{res.path}:{res.line_start}-{res.line_end}" if res.path else "-"
@@ -74,6 +94,10 @@ def cmd_show(args: argparse.Namespace) -> int:
     if mark is None:
         print(f"sourcemark: unknown mark {args.ref}", file=sys.stderr)
         return 2
+    if mark.kind == "db":
+        cols = ", ".join(f"{c}={v['excerpt'] if v['excerpt'] is not None else '[fingerprint only]'}" for c, v in mark.quote["columns"].items())
+        _out(args, mark.to_dict(), f"{mark.token} {mark.source['database']}:{mark.source['schema']}.{mark.source['table']} {mark.source['pk']}\n{cols}")
+        return 0
     q = mark.quote.get("exact")
     _out(args, mark.to_dict(), f"{mark.token} {mark.source.get('path')}:{mark.position['line_start']}\n{q if q is not None else '[redacted]'}")
     return 0
@@ -124,8 +148,18 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("resolve", help="find a mark again and report what happened to it")
     p.add_argument("ref", help="mark id or [sm:token]")
     p.add_argument("--root", action="append", help="directory to search when the file moved (repeatable)")
+    p.add_argument("--dsn", help="connection string for database marks")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_resolve)
+
+    p = sub.add_parser("mark-row", help="cite columns of one database row (PostgreSQL, read-only)")
+    p.add_argument("table", help="[schema.]table")
+    p.add_argument("pk", help="primary key value, or col=val,col=val for composite keys")
+    p.add_argument("columns", nargs="+")
+    p.add_argument("--dsn", help="connection string (default: $SOURCEMARK_DSN or $DATABASE_URL)")
+    p.add_argument("--database", default="default", help="label stored in the citation")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_mark_row)
 
     p = sub.add_parser("show", help="print a stored mark")
     p.add_argument("ref")
