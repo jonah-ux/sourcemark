@@ -983,8 +983,18 @@ class CodexRolloutTest(unittest.TestCase):
         ])
         sess, _ = read_transcript(p)
         self.assertEqual(check_text("a.py:3", sess).checks[0].verdict, "verified")
-        for n in (40, 50, 60):  # failed, truncated, computed command: no line credit
+        # A cut output keeps the hits that survived: each carries its own line number.
+        self.assertEqual(check_text("a.py:50", sess).checks[0].verdict, "verified")
+        for n in (40, 60):  # failed, computed command: no line credit
             self.assertNotEqual(check_text(f"a.py:{n}", sess).checks[0].verdict, "verified")
+
+    def test_cut_output_places_no_counted_lines(self):
+        from sourcemark.observe import read_transcript
+
+        body = "Warning: truncated output (original token count: 9000)\nTotal output lines: 90\n\n" + "\n".join(f"x{i} = {i}" for i in range(10, 15)) + "…99 tokens truncated…x80 = 80\n"
+        p = self.rollout(self.d, [('const r = await tools.exec_command({cmd: "sed -n \'10,80p\' a.py"}); text(r.output);', body)])
+        sess, _ = read_transcript(p)
+        self.assertNotEqual(check_text("a.py:11", sess).checks[0].verdict, "verified")
 
     def test_urls_typed_into_a_cell_are_not_sourced(self):
         from sourcemark.observe import read_transcript
@@ -995,3 +1005,74 @@ class CodexRolloutTest(unittest.TestCase):
         sess, _ = read_transcript(p)
         self.assertIn(got, " ".join(sess.urls))
         self.assertNotIn(typed, " ".join(sess.urls))
+
+
+class SelfNumberedAndBatchTest(unittest.TestCase):
+    """From real Codex rollouts: `nl -ba F | sed -n 'A,Bp'` and multi-command cells."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="sm-nl-")
+        self.addCleanup(shutil.rmtree, self.d, True)
+        os.makedirs(os.path.join(self.d, "lib"))
+        for n in ("a.py", "b.py"):
+            with open(os.path.join(self.d, "lib", n), "w") as fh:
+                fh.write("\n".join(f"{n[0]}{i} = {i}" for i in range(1, 300)) + "\n")
+
+    def nums(self, obs):
+        return {(os.path.basename(o.path), n) for o in obs for n in (o.line_numbers or [])}
+
+    def test_nl_slice_carries_its_own_numbers(self):
+        obs = from_shell("nl -ba lib/a.py | sed -n '10,12p'", "    10\ta10 = 10\n    11\ta11 = 11\n    12\ta12 = 12\n", self.d)
+        self.assertEqual(self.nums(obs), {("a.py", 10), ("a.py", 11), ("a.py", 12)})
+
+    def test_several_nl_slices_split_where_numbering_restarts(self):
+        out = "    40\ta40 = 40\n    41\ta41 = 41\n     3\tb3 = 3\n"
+        obs = from_shell("nl -ba lib/a.py | sed -n '40,41p'; nl -ba lib/b.py | sed -n '3,3p'", out, self.d)
+        self.assertEqual(self.nums(obs), {("a.py", 40), ("a.py", 41), ("b.py", 3)})
+
+    def test_continuing_numbers_hide_the_boundary(self):
+        out = "    40\ta40 = 40\n    41\ta41 = 41\n    90\tb90 = 90\n"
+        obs = from_shell("nl -ba lib/a.py | sed -n '40,41p'; nl -ba lib/b.py | sed -n '90,90p'", out, self.d)
+        self.assertEqual(self.nums(obs), set())
+
+    def test_renumbering_pipelines_are_not_self_numbered(self):
+        from sourcemark.observe import _self_numbered
+
+        for seg in ("sed -n '5,9p' lib/a.py | nl -ba", "nl -ba -v5 lib/a.py", "nl -ba lib/a.py | cut -c1-20", "git show x:lib/a.py | nl -ba"):
+            self.assertIsNone(_self_numbered(seg, self.d), seg)
+
+    def test_batch_cell_credits_only_self_describing_grep_hits(self):
+        from sourcemark.observe import _batch_grep_evidence
+
+        code = (
+            'const w = "%s";\nconst cmds = [\n ["a", {cmd: "rg -n \'a1[0-2] \' lib", workdir: w}],\n'
+            ' ["b", {cmd: "rg -n \'a5 \' lib/a.py", workdir: w}],\n ["c", {cmd: "echo lib/b.py:77:b77", workdir: w}],\n];\n'
+            "for (const [n, o] of cmds) { const r = await tools.exec_command(o); text(`== ${n}\\n` + r.output); }"
+        ) % self.d
+        out = "== a\nlib/a.py:10:a10 = 10\nlib/b.py:11:b11 = 11\n== b\n5:a5 = 5\n== c\nlib/b.py:77:b77\n"
+        self.assertEqual(self.nums(_batch_grep_evidence(code, out, "/elsewhere", None)), {("a.py", 10)})
+
+    def test_slices_of_one_file_need_no_split(self):
+        out = "     5\ta5 = 5\n    90\ta90 = 90\n"
+        obs = from_shell("nl -ba lib/a.py | sed -n '5,5p'; nl -ba lib/a.py | sed -n '90,90p'", out, self.d)
+        self.assertEqual(self.nums(obs), {("a.py", 5), ("a.py", 90)})
+
+    def test_labelled_batch_splits_only_on_unique_labels(self):
+        from sourcemark.observe import _labelled_batch_evidence
+
+        code = (
+            'const commands = [\n ["release gates", "nl -ba lib/a.py | sed -n \'10,11p\'"],\n'
+            ' ["plan checks", "nl -ba lib/b.py | sed -n \'20,20p\'"]\n];\n'
+            'for (const [l, c] of commands) { const r = await tools.exec_command({cmd: c, workdir: "%s"}); text(`--- ${l}\\n` + r.output); }'
+        ) % self.d
+        out = "--- release gates\n    10\ta10 = 10\n    11\ta11 = 11\nexit 0\n--- plan checks\n    20\tb20 = 20\n"
+        self.assertEqual(self.nums(_labelled_batch_evidence(code, out, "/x", None)), {("a.py", 10), ("a.py", 11), ("b.py", 20)})
+        repeated = out + "see release gates above\n"
+        self.assertEqual(_labelled_batch_evidence(code, repeated, "/x", None), [])
+
+    def test_codex_cut_keeps_only_self_numbered_lines(self):
+        from sourcemark.observe import _codex_uncut
+
+        cut, text = _codex_uncut("Warning: truncated output (original token count: 99)\nTotal output lines: 9\n\n  10\ta\n  11\tb…20 tokens truncated…c\n  90\tz\n")
+        self.assertTrue(cut)
+        self.assertEqual(text, "  10\ta\n  90\tz\n")
