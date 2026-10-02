@@ -197,3 +197,109 @@ class RedactionTest(unittest.TestCase):
         e = doc.index("\n", s)
         m = mark_text(doc, s, e, TextSource(path="/x"), context=20)
         self.assertIsNone(m.quote["exact"])  # the 20-char suffix would hold a fragment of the token
+
+
+class AdversarialRound2ResolveTest(unittest.TestCase):
+    """Confident wrong answers and slow paths found by the second adversarial review."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="sm-res2-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def write(self, name, text):
+        p = os.path.join(self.dir, name)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as fh:
+            fh.write(text)
+        return p
+
+    def mark(self, p, a, b):
+        from sourcemark.anchor import TextSource
+        with open(p) as fh:
+            return mark_lines(fh.read(), a, b, TextSource(path=p))
+
+    def test_loose_match_does_not_land_inside_another_line(self):
+        p = self.write("calc.py", "def a(x, y):\n    total = compute(x)   \n    return total\n\ndef b(x, y):\n    total = compute(x) + offset(y)\n    return total\n")
+        m = self.mark(p, 2, 2)
+        self.write("calc.py", "def a(x, y):\n    total = compute(y)\n    return total\n\ndef b(x, y):\n    total = compute(x) + offset(y)\n    return total\n")
+        r = resolve(m, search=False)
+        self.assertNotEqual(r.line_start, 6)
+        self.assertIn(r.status, ("edited", "orphaned"))
+
+    def test_long_duplicate_left_alone_is_not_the_cited_copy(self):
+        line = '    raise ValueError("invalid configuration value")'
+        p = self.write("cfg.py", f"def load():\n    cfg = read()\n{line}\n\ndef save():\n    cfg = write()\n{line}\n")
+        m = self.mark(p, 7, 7)
+        self.assertEqual(m.position["occurrences"], 2)
+        self.write("cfg.py", f"def load():\n    cfg = read()\n{line}\n\ndef save():\n    cfg = write()\n")
+        self.assertNotEqual(resolve(m, search=False).status, "shifted")
+
+    def test_real_moved_file_beats_an_identical_decoy(self):
+        body = '    if not user.is_active:\n        raise PermissionError("inactive account cannot log in")\n    return issue_session(user)\n'
+        p = self.write("proj/auth.py", f"# auth module\nimport os\n\ndef login(user):\n{body}\ndef logout(user):\n    drop(user)\n")
+        self.write("proj/vendor/aaa_legacy.py", f"# legacy copy, never called\nfrom old import *\n\ndef legacy_login_v1(user, ctx, flags):\n{body}\n# end legacy\n")
+        m = self.mark(p, 5, 7)
+        os.makedirs(os.path.join(self.dir, "proj/newpkg"))
+        os.rename(p, os.path.join(self.dir, "proj/newpkg/auth.py"))
+        r = resolve(m, roots=[os.path.join(self.dir, "proj")])
+        self.assertEqual((r.status, os.path.basename(os.path.dirname(r.path))), ("moved", "newpkg"))
+
+    def test_license_header_does_not_move_to_another_file(self):
+        h = "# Copyright (c) 2024 Example Corp. All rights reserved.\n# Licensed under the MIT License.\n# See LICENSE in the project root for details.\n"
+        p = self.write("proj/billing.py", f"{h}\ndef billing():\n    charge()\n")
+        self.write("proj/report.py", f"{h}\ndef unrelated_report():\n    render()\n")
+        m = self.mark(p, 1, 3)
+        os.remove(p)
+        self.assertEqual(resolve(m, roots=[os.path.join(self.dir, "proj")]).status, "orphaned")
+
+    def _big(self, n=600, seed=1):
+        import random
+        r = random.Random(seed)
+        words = ["self", "value", "result", "items", "config", "data", "index", "count", "total", "name"]
+        out = []
+        for i in range(n):
+            a, b, c = r.sample(words, 3)
+            out.append(f"    {a}_{i} = compute_{b}({c}, {i}) + helper({a}, {b})")
+        return out
+
+    def test_long_edited_block_resolves_fast(self):
+        import time
+        lines = self._big()
+        p = self.write("big.py", "\n".join(lines) + "\n")
+        m = self.mark(p, 1, 200)
+        for i in range(0, 200, 10):
+            lines[i] = lines[i].replace("helper", "assist")
+        self.write("big.py", "\n".join(lines) + "\n")
+        t = time.perf_counter()
+        r = resolve(m, search=False)
+        self.assertLess(time.perf_counter() - t, 2.0)
+        self.assertEqual((r.status, r.line_start), ("edited", 1))
+
+    def test_orphan_search_over_siblings_is_bounded(self):
+        import time
+        header = "# Copyright (c) 2024 Example Corp. Licensed under the MIT License."
+        p = self.write("root/cited.py", "\n".join([header, *self._big(300, 0)]) + "\n")
+        m = self.mark(p, 1, 100)
+        os.remove(p)
+        for k in range(10):
+            self.write(f"root/other_{k}.py", "\n".join([header, *self._big(300, k + 1)]) + "\n")
+        t = time.perf_counter()
+        r = resolve(m, roots=[os.path.join(self.dir, "root")])
+        self.assertLess(time.perf_counter() - t, 5.0)
+        self.assertEqual(r.status, "orphaned")
+
+
+class NeighbourSlideTest(unittest.TestCase):
+    def test_deleted_line_is_not_matched_to_its_lookalike_neighbour(self):
+        from sourcemark.anchor import TextSource
+        from sourcemark.locate import locate
+
+        doc = "def load(blob, data):\n    try: return json.loads(blob)\n    try: return json.loads(data)\n    finally: close()\n"
+        m = mark_lines(doc, 2, 2, TextSource(path="/x"))
+        after = doc.replace("    try: return json.loads(blob)\n", "")
+        q = m.quote
+        self.assertIsNone(locate(after, q["exact"], q["prefix"], q["suffix"], hint_start=m.position["start"]))
+        edited = doc.replace("json.loads(blob)", "json.loads(blob2)")  # in place: neighbours stay
+        hit = locate(edited, q["exact"], q["prefix"], q["suffix"], hint_start=m.position["start"])
+        self.assertIsNotNone(hit)
+        self.assertIn("blob2", edited[hit.start : hit.end])
