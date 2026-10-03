@@ -16,6 +16,7 @@ from typing import Any
 from . import __version__
 from .anchor import mark_lines, mark_text
 from .check import check_text
+from .check_export import export_check_v1
 from .db import PsqlRunner, mark_row, resolve_row
 from .gitinfo import source_for
 from .hooks import failing, run_stop
@@ -105,14 +106,29 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    sess, texts = read_transcript(args.transcript)
-    if args.text:
-        body = [open(args.text, encoding="utf-8").read()]
-    elif args.all:
-        body = [t for _, t in texts]
-    else:
-        last = sess.text_turns[-1] if sess.text_turns else None
-        body = [t for (_, t), n in zip(texts, sess.text_turns) if n == last] or [t for _, t in texts[-1:]]
+    if args.export and not _valid_jsonl(args.transcript):
+        print("sourcemark: check export refused: malformed transcript", file=sys.stderr)
+        return 2
+    try:
+        sess, texts = read_transcript(args.transcript)
+    except (OSError, ValueError, TypeError):
+        if args.export:
+            print("sourcemark: check export refused: unreadable transcript", file=sys.stderr)
+            return 2
+        raise
+    try:
+        if args.text:
+            body = [open(args.text, encoding="utf-8").read()]
+        elif args.all:
+            body = [t for _, t in texts]
+        else:
+            last = sess.text_turns[-1] if sess.text_turns else None
+            body = [t for (_, t), n in zip(texts, sess.text_turns) if n == last] or [t for _, t in texts[-1:]]
+    except (OSError, UnicodeError):
+        if args.export:
+            print("sourcemark: check export refused: unreadable check text", file=sys.stderr)
+            return 2
+        raise
     from .check import Report
 
     from .check import UnavailableLedger
@@ -127,10 +143,29 @@ def cmd_check(args: argparse.Namespace) -> int:
     finally:
         if isinstance(led, Ledger):
             led.close()
+    if args.export:
+        # An explicit export is always one sanitized JSON document, even when
+        # the caller did not also pass the local report's ``--json`` flag.
+        print(json.dumps(export_check_v1(rep, sess), indent=2, sort_keys=True))
+        return 1 if any(c.verdict in failing() for c in rep.checks) else 0
     lines = [f"{c.verdict:15} {c.raw[:100]}" + (f"  ({c.detail})" if c.detail else "") for c in rep.checks]
     lines.append(f"-- {rep.passing}/{rep.total} backed by this session")
     _out(args, rep.to_dict(), "\n".join(lines))
     return 1 if any(c.verdict in failing() for c in rep.checks) else 0
+
+
+def _valid_jsonl(path: str) -> bool:
+    """Reject malformed input on the explicit export path without echoing it."""
+
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.strip():
+                    if not isinstance(json.loads(line), dict):
+                        return False
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+    return True
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
@@ -192,6 +227,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--all", action="store_true", help="check every assistant message, not just the last turn")
     p.add_argument("--now", action="store_true", help="also report whether cited lines changed since they were read")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--export", choices=("v1",), metavar="SCHEMA", help="emit a sanitized versioned check export (currently v1)")
     p.set_defaults(func=cmd_check)
 
     p = sub.add_parser("verify-ledger", help="recompute the ledger hash chain and cross-check marks")

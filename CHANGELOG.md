@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add the explicit `check --export v1` boundary projection for sanitized citation/read-evidence
+  results. The versioned envelope carries only bounded state, fixed scalar counts, and hashed
+  policy/session identities; malformed input is refused without emitting report details.
+
 ## 0.4.0 — 2026-10-02
 
 Learned from the real Claude Code citations the independent oracle saw but the checker flagged `unread_lines`: 55 open cases are down to 26. Every fix has a regression test built from the real failing shape.
