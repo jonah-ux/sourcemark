@@ -962,24 +962,33 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
     if len(out) > 1 or (out and len(loud) > 1):
         split = _split_by_echo_markers(segments, stdout, {owner[i]: o for i, o in enumerate(out)})
         if split is not None:
-            return extra + split
+            # Slices the markers could not separate still printed their line NUMBERS.
+            placed = {o.path for o in split if o.tool == "Bash" and o.lines}
+            return extra + split + [o for o in _printed_ranges(out, owner, segments, stdout, at) if o.path not in placed]
         # Several things printed into one stdout: the TEXT cannot be attributed to lines. File-level
         # evidence, plus, for an unpiped `sed -n A,Bp f`, the line NUMBERS it printed (text unknown,
         # so quotes on those lines are not judged from it).
         res = extra + [Observation(o.path, 0, [], "Bash-touch", at, line_numbers=[]) for o in out]
-        if stdout.strip():
-            for i, o in enumerate(out):
-                seg = segments[owner[i]]
-                rng = re.fullmatch(r"sed\s+-n\s+'?(\d+),(\d+)p'?\s+\S+", seg.strip())
-                if rng and "|" not in seg:
-                    a, b = int(rng.group(1)), int(rng.group(2))
-                    n_file = _line_count(o.path)
-                    if n_file is not None:
-                        b = min(b, n_file)
-                    if a <= b and b - a < 5000:
-                        res.append(Observation(o.path, 0, [None] * (b - a + 1), "Bash-range", at, line_numbers=list(range(a, b + 1))))
-        return res
+        return res + _printed_ranges(out, owner, segments, stdout, at)
     return extra + out
+
+
+def _printed_ranges(out: list[Observation], owner: dict[int, int], segments: list[str], stdout: str, at: str | None) -> list[Observation]:
+    """Line NUMBERS (not text) printed by each unpiped ``sed -n A,Bp f`` in a shared stdout."""
+    res: list[Observation] = []
+    if not stdout.strip():
+        return res
+    for i, o in enumerate(out):
+        seg = segments[owner[i]]
+        rng = re.fullmatch(r"sed\s+-n\s+'?(\d+),(\d+)p'?\s+\S+", seg.strip())
+        if rng and "|" not in seg:
+            a, b = int(rng.group(1)), int(rng.group(2))
+            n_file = _line_count(o.path)
+            if n_file is not None:
+                b = min(b, n_file)
+            if a <= b and b - a < 5000:
+                res.append(Observation(o.path, 0, [None] * (b - a + 1), "Bash-range", at, line_numbers=list(range(a, b + 1))))
+    return res
 
 
 # Commands that run another command unchanged: `timeout 60 rg -n ...` is the rg.
@@ -1805,7 +1814,7 @@ def _json_results(text: str) -> list[dict[str, Any]] | None:
     return out or None
 
 
-def _header_chunks(items: list[dict[str, Any]], text: str) -> list[str] | None:
+def _header_chunks(items: list[dict[str, Any]], text: str, code: str = "") -> list[str] | None:
     """Split output printed as ``<prefix><label><suffix>`` header lines, one per command, in order.
     The header shape is learned from the output: it must match exactly one whole line per
     command, and frame the label with something (a bare label line could be file content)."""
@@ -1815,15 +1824,18 @@ def _header_chunks(items: list[dict[str, Any]], text: str) -> list[str] | None:
         where.setdefault(x, []).append(i)
     width = min((len(it["labels"]) for it in items), default=0)
     candidates = [[it["labels"][j] for it in items] for j in range(width)]
-    candidates += [[str(i + 1) for i in range(len(items))], [str(i) for i in range(len(items))]]
+    if re.search(r"`[^`]*\$\{\s*\w+\s*\+\s*1\s*\}", code):
+        candidates.append([str(i + 1) for i in range(len(items))])  # `--- ${i + 1} ---`
+    if re.search(r"`[^`]*\$\{\s*(?:i|idx|index|k|n|j)\s*\}", code):
+        candidates.append([str(i) for i in range(len(items))])
     for labels in candidates:
         if len(set(labels)) != len(labels):
             continue
         first = labels[0]
         shapes = dict.fromkeys((x[: x.index(first)], x[x.index(first) + len(first) :]) for x in where if first in x)
         for pre, suf in list(shapes)[:200]:
-            if not (pre + suf).strip():
-                continue
+            if not (pre + suf).strip() or (pre[-1:].isalnum() and first[:1].isalnum()) or (suf[:1].isalnum() and first[-1:].isalnum()):
+                continue  # a frame is needed, and the label must stand on its own ("17" is not "1")
             pos, bounds = 0, []
             for lab in labels:
                 hits = where.get(pre + lab + suf, [])
@@ -1880,7 +1892,7 @@ def _cell_batch_evidence(code: str, text: str, cwd: str | None, at: str | None, 
             return None
         chunks = [None if r is None or r.get("exit_code") else r["output"] for r in picked]
     else:
-        found = _header_chunks(items, text)
+        found = _header_chunks(items, text, code)
         if found is None:
             return _concatenated_evidence(code, items, text, cwd, at)
         chunks = list(found)
