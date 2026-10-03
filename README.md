@@ -18,6 +18,20 @@ sourcemark --version
 python3 demos/demo.py        # 30-second synthetic walkthrough (from a checkout)
 ```
 
+Before installing, open the [synthetic walkthrough](docs/walkthrough.html) for a visual tour of
+the citation lifecycle. It uses the same harbor fixture as the demo: mark a line, rename the file,
+edit the wording, then resolve the citation and check the agent's answer. The page is a single
+dependency-free HTML file, so it does not require another Jonah-UX repository or a running service.
+
+From that checkout, the shortest useful first run after installing is still:
+
+```console
+python3 demos/demo.py
+```
+
+That command creates and removes its own temporary git repository, prints each step, and exits
+non-zero if the moved/edited citation or the deliberate checker refusals do not appear.
+
 Each [release](https://github.com/jonah-ux/sourcemark/releases) also ships a wheel, an sdist and
 `SHA256SUMS`; `pip install sourcemark-0.4.0-py3-none-any.whl` after checking the hash. Python 3.11+,
 no dependencies.
@@ -30,6 +44,7 @@ sourcemark resolve [sm:7f3a9c2b1d]            # intact | shifted | moved | edite
 sourcemark mark-row public.orders 1042 status total --dsn "$DATABASE_URL"
 sourcemark resolve [sm:…] --dsn "$DATABASE_URL"   # intact | drifted (changed: total) | deleted
 sourcemark check ~/.claude/projects/<project>/<session>.jsonl
+sourcemark check ~/.claude/projects/<project>/<session>.jsonl --export v1
 sourcemark verify-ledger
 ```
 
@@ -102,6 +117,12 @@ Evaluated against real source files, real git history and real agent sessions. S
 ## Agent usage
 
 Agents should call `sourcemark check <transcript> --json` (exit 1 when any citation is unsupported) or install the Stop hook. Every command prints one JSON document with `--json`; exit codes are 0 ok, 1 failed check, 2 usage error. See [AGENTS.md](AGENTS.md).
+
+For a cross-tool boundary, add the explicit `--export v1` flag to `check`. It emits only one
+`sourcemark/check/v1` JSON envelope with a bounded `ok`, `observed`, `partial`, or `timed_out`
+state, fixed scalar counts, and `sha256:` policy/session identities. The export never contains
+paths, quotes, transcript text, URLs, raw mark tokens, or ledger contents. The ordinary `check
+--json` report keeps its detailed local fields.
 
 ## Docs
 
