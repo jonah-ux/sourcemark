@@ -57,6 +57,24 @@ def _near_miss(tok: str, text: str) -> str | None:
     return None
 
 
+def _near_miss_on_line(tok: str, window: list[str]) -> str | None:
+    """A token on the cited lines that ``tok`` misquotes by a character or two, whatever its
+    shape (``@classmethodX``, ``!MASTER-INDEXX.md``, ``p.settlement_revisionX``, a URL)."""
+    if len(tok) < 6:
+        return None
+    flat = lambda x: re.sub(r"[-_.]", "", x).lower()  # noqa: E731
+    for line in window:
+        for cand in re.split(r"[\s`'\"(),;=<>\[\]{}]+", line):
+            cand = cand.strip(":.*")
+            if not cand or cand == tok or abs(len(cand) - len(tok)) > 2 or cand[:3] != tok[:3]:
+                continue
+            if flat(cand).rstrip("s") == flat(tok).rstrip("s"):
+                continue  # plural or separator variant: prose, not a misquote
+            if difflib.SequenceMatcher(None, cand, tok, autojunk=False).ratio() >= 1 - 2.5 / max(len(cand), len(tok)):
+                return cand
+    return None
+
+
 def _soft_checkable(tok: str) -> bool:
     """A single name worth the soft check: letters, 4+ chars, and not a file name or path (a
     sentence may name another file that the cited one never spells out)."""
@@ -258,6 +276,16 @@ def _quotes_missing(c: Citation, obs: list, out: CitationCheck) -> bool:
     for q in c.claimed_quotes:
         if not _CODEISH.search(q):
             tok = q.strip().strip("'\"").rstrip(":")
+            if squash(tok) not in hay and _near_miss_on_line(tok, window):
+                if read_all is None:
+                    texts = [t for o in obs for t in (o.lines or [])]
+                    read_all = "" if any(t is None for t in texts) else "\n".join(texts)
+                # Absent from the cited lines while they hold it with a character or two
+                # changed: a misquote of those lines, whatever the token's shape. Unless the
+                # file has it elsewhere: then it is a real name (`closedate` beside `closedDate`).
+                if tok not in read_all:
+                    out.quotes_checked += 1
+                    continue
             if not _soft_checkable(tok):
                 continue
             else:
