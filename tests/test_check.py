@@ -1264,6 +1264,17 @@ class CodeSpanPairingTest(unittest.TestCase):
         self.assertEqual(cs[0].claimed_quotes, [])
 
 
+class LinkAsCodeTest(unittest.TestCase):
+    """From real Codex rollouts: citations written as `[a.py:24](/abs/a.py:24)` in backticks."""
+
+    def test_a_neighbouring_link_in_backticks_is_not_a_quote(self):
+        t = ("Reserved at `[life.py:24](/w/agent/life.py:24)` and invoked from "
+             "`[turn.py:1453](/w/agent/turn.py:1453)`, with `_start_work(x)` there.")
+        got = {c.raw: c.claimed_quotes for c in extract(t)}
+        self.assertTrue(all(not q.startswith("[") for qs in got.values() for q in qs), got)
+        self.assertIn(["_start_work(x)"], list(got.values()))
+
+
 class MisquotedNameTest(unittest.TestCase):
     """A bare name is a mention, not a quote, unless it misquotes a name that WAS read."""
 
