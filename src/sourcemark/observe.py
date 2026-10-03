@@ -713,6 +713,38 @@ def _numbered_lines(text: str) -> list[tuple[int, str]]:
     return [(int(m.group(1)), m.group(2)) for m in map(_NUMBERED_LINE.match, text.split("\n")) if m]
 
 
+_CD_SEG = re.compile(r"""cd(?:\s+(?P<dir>'[^']*'|"[^"]*"|[^\s'"]+))?(?:\s+2>\s*/dev/null)?""")
+
+
+def _segment_cwds(segments: list[str], cwd: str | None) -> list[str | None] | None:
+    """The directory each segment runs in, following plain ``cd DIR`` segments.
+
+    None when a ``cd`` goes somewhere unknown (``cd "$d"``, ``cd -``) or only sometimes
+    (inside a subshell, a loop, an ``if``), or the directory stack moves."""
+    out: list[str | None] = []
+    cur = cwd
+    for seg in segments:
+        out.append(cur)
+        s = seg.strip()
+        if re.search(r"(?:^|[\s(;&|])(?:pushd|popd)\b", s):
+            return None
+        if not re.search(r"(?:^|[\s(;&|])cd\b", s):
+            continue
+        m = _CD_SEG.fullmatch(s)
+        if not m:
+            return None  # `(cd x && ...)`, `then cd x`, `do cd "$d"`: not followed
+        d = (m.group("dir") or "~").strip("'\"")
+        if d == "-" or re.search(r"[$`*?]", d):
+            return None
+        d = os.path.expanduser(d)
+        if not os.path.isabs(d):
+            if cur is None:
+                return None
+            d = os.path.join(cur, d)
+        cur = os.path.normpath(d)
+    return out
+
+
 def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None) -> list[Observation]:
     """Recognize simple file-printing commands whose stdout is a known file slice."""
     out: list[Observation] = []
@@ -720,8 +752,10 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
     segments = [_unwrap(x) for x in _split_unquoted(command, newlines=True)]
     loud = [x for x in segments if x and not _SILENT.match(x)]
     printers = [x for x in loud if (x.split() or [""])[0].rsplit("/", 1)[-1] in _PRINTERS]
-    if any(re.match(r"cd\b", x) for x in segments[1:]):
-        # The command changed directory part-way: the same relative name can mean two files.
+    cwds = _segment_cwds(segments, cwd)
+    if cwds is None:
+        # The command changed directory part-way to somewhere unknown: the same relative name
+        # can mean two files.
         return [o for o in _file_level_mentions(segments, cwd, at)]
     extra: list[Observation] = []  # grep evidence; other segments keep contributing
     fenced: list[tuple[list[int], list[str]]] | None | bool = False  # echo-marker chunks, lazily
@@ -735,19 +769,20 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
                 fenced = _echo_chunks(segments, stdout)
             for segs, chunk in fenced or []:
                 if segs == [k]:
-                    return _grep_evidence(gargv, "\n".join(chunk) + "\n", cwd, at, alone=True)
-        return _grep_evidence(gargv, stdout, cwd, at, alone=len(loud) == 1, other_printers=len(printers) > 1)
+                    return _grep_evidence(gargv, "\n".join(chunk) + "\n", cwds[k], at, alone=True)
+        return _grep_evidence(gargv, stdout, cwds[k], at, alone=len(loud) == 1, other_printers=len(printers) > 1)
 
     numbered: dict[int, str] = {}  # segment -> file, for self-numbered printers (nl -ba, cat -n)
     for k, seg in enumerate(segments):
-        nfile = _self_numbered(seg, cwd)
+        here = cwds[k]
+        nfile = _self_numbered(seg, here)
         if nfile is not None:
             numbered[k] = nfile
             continue
         pipe = _unquoted_pipe(seg)
         if pipe is not None:
             first = seg[:pipe].strip()
-            source = _piped_source(first, cwd)
+            source = _piped_source(first, here)
             if source is not None:
                 stages = [x.strip() for x in _split_unquoted(seg[pipe + 1 :], pipes=True)]
                 try:
@@ -788,7 +823,7 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
         if not argv:
             continue
         cmd, args = os.path.basename(argv[0]), argv[1:]
-        shown = _git_show_file(argv, cwd)
+        shown = _git_show_file(argv, here)
         if shown:
             cmd, args = "cat", [shown]
         if cmd == "head" and "-n" in args:
@@ -811,7 +846,7 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
         if cmd not in ("cat", "sed", "head", "tail", "nl") or len(files) != 1:
             continue
         path = os.path.expanduser(files[0])  # before the join: `~/x` is absolute, not relative
-        path = path if os.path.isabs(path) or not cwd else os.path.join(cwd, path)
+        path = path if os.path.isabs(path) or not here else os.path.join(here, path)
         lines = stdout.split("\n")
         if lines and lines[-1] == "":
             lines = lines[:-1]
