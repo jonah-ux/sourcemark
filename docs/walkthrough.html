@@ -45,7 +45,7 @@
       background: #0c1726; box-shadow: 0 20px 60px #0004;
     }
     code, pre { font-family: var(--mono); }
-    .install code { color: var(--yellow); font-size: .92rem; overflow-wrap: anywhere; }
+    .install code { color: var(--yellow); font-size: .92rem; overflow-wrap: anywhere; white-space: pre-wrap; }
     button {
       border: 1px solid #3d566f; border-radius: 999px; padding: 10px 15px; cursor: pointer;
       color: var(--ink); background: var(--panel-2); font: 700 12px var(--mono); letter-spacing: .04em;
@@ -149,9 +149,9 @@
       <div class="eyebrow">Sourcemark · synthetic field guide</div>
       <h1>The citation that refuses to die.</h1>
       <p class="lede"><strong>Move the file. Edit the sentence. Test the agent.</strong> Sourcemark keeps the trail from a claim back to the evidence, then tells you when that trail drifts.</p>
-      <div class="install" aria-label="Install Sourcemark">
-        <code>python3 -m pip install 'git+https://github.com/jonah-ux/sourcemark.git@v0.4.0'</code>
-        <button type="button" data-copy="python3 -m pip install &apos;git+https://github.com/jonah-ux/sourcemark.git@v0.4.0&apos;">copy install</button>
+      <div class="install" aria-label="Install Sourcemark and run its synthetic demo">
+        <code>git clone --branch v0.5.1 --depth 1 https://github.com/jonah-ux/sourcemark.git &amp;&amp; cd sourcemark &amp;&amp; python3 -m venv .venv &amp;&amp; . .venv/bin/activate &amp;&amp; python3 -m pip install . &amp;&amp; python3 demos/demo.py --installed</code>
+        <button type="button" data-copy="git clone --branch v0.5.1 --depth 1 https://github.com/jonah-ux/sourcemark.git &amp;&amp; cd sourcemark &amp;&amp; python3 -m venv .venv &amp;&amp; . .venv/bin/activate &amp;&amp; python3 -m pip install . &amp;&amp; python3 demos/demo.py --installed">copy quickstart</button>
       </div>
     </header>
     <section class="cohort-deck" data-cohort-deck="sourcemark" style="--deck-accent: var(--cyan); --deck-good: var(--green);" aria-labelledby="sourcemark-deck-title">
@@ -246,7 +246,7 @@
     </section>
 
     <footer>
-      <p>To reproduce the illustrated incident, first clone the tagged source: <code>git clone --branch v0.4.0 --depth 1 https://github.com/jonah-ux/sourcemark.git</code>, then <code>cd sourcemark</code>. The demo file is included in that checkout; it is not a CLI subcommand.</p>
+      <p>To reproduce the illustrated incident, first clone the tagged source: <code>git clone --branch v0.5.1 --depth 1 https://github.com/jonah-ux/sourcemark.git</code>, then <code>cd sourcemark</code>. The demo file is included in that checkout; it is not a CLI subcommand.</p>
       <p>Want the source? Open <a href="https://github.com/jonah-ux/sourcemark#readme">README.md</a> or run <code>python3 demos/demo.py</code> from a checkout. The walkthrough is intentionally self-contained so it can be read before installing anything.</p>
     </footer>
   </main>
