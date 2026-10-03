@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A tiny, synthetic Sourcemark walkthrough: cite it, move it, prove it.">
+  <title>Sourcemark · citations with a memory</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #edf2f7;
+      --muted: #91a0b2;
+      --line: #263447;
+      --panel: #101b2a;
+      --panel-2: #152337;
+      --bg: #08111f;
+      --cyan: #6fe7db;
+      --yellow: #ffd166;
+      --pink: #ff8fb3;
+      --green: #8ce99a;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 15% 0%, #16304d 0, transparent 36rem),
+        radial-gradient(circle at 100% 20%, #1e2b48 0, transparent 30rem),
+        var(--bg);
+      font: 16px/1.55 var(--sans);
+    }
+    a { color: var(--cyan); }
+    .wrap { width: min(1120px, calc(100% - 36px)); margin: 0 auto; }
+    header { padding: 68px 0 30px; }
+    .eyebrow { color: var(--cyan); font: 700 12px/1 var(--mono); letter-spacing: .18em; text-transform: uppercase; }
+    h1 { max-width: 780px; margin: 14px 0 16px; font-size: clamp(2.8rem, 7vw, 6.5rem); line-height: .94; letter-spacing: -.065em; }
+    .lede { max-width: 690px; color: var(--muted); font-size: clamp(1.05rem, 2vw, 1.3rem); }
+    .lede strong { color: var(--ink); }
+    .install {
+      display: flex; align-items: center; justify-content: space-between; gap: 18px;
+      margin-top: 26px; padding: 14px 16px 14px 20px; border: 1px solid var(--line); border-radius: 14px;
+      background: #0c1726; box-shadow: 0 20px 60px #0004;
+    }
+    code, pre { font-family: var(--mono); }
+    .install code { color: var(--yellow); font-size: .92rem; overflow-wrap: anywhere; }
+    button {
+      border: 1px solid #3d566f; border-radius: 999px; padding: 10px 15px; cursor: pointer;
+      color: var(--ink); background: var(--panel-2); font: 700 12px var(--mono); letter-spacing: .04em;
+    }
+    button:hover, button:focus-visible { border-color: var(--cyan); color: var(--cyan); outline: 2px solid #6fe7db33; outline-offset: 2px; }
+    .hero-grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: 18px; margin: 30px 0 18px; }
+    .card { border: 1px solid var(--line); border-radius: 18px; background: #0e1a2aee; box-shadow: 0 20px 60px #0003; }
+    .card-inner { padding: 24px; }
+    .card h2 { margin: 0 0 8px; font-size: 1.2rem; }
+    .card p { margin: 0; color: var(--muted); }
+    .flow { display: grid; gap: 11px; margin-top: 22px; }
+    .flow-step { display: grid; grid-template-columns: 33px 1fr auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid #294157; border-radius: 12px; background: #122237; }
+    .step-no { display: grid; place-items: center; width: 27px; height: 27px; border-radius: 50%; color: var(--bg); background: var(--cyan); font: 800 12px var(--mono); }
+    .flow-step strong { display: block; font-size: .95rem; }
+    .flow-step span { color: var(--muted); font-size: .83rem; }
+    .pill { border-radius: 999px; padding: 4px 8px; color: var(--cyan); background: #6fe7db16; font: 700 10px var(--mono); letter-spacing: .08em; }
+    .lighthouse { position: relative; min-height: 100%; overflow: hidden; }
+    .lighthouse svg { display: block; width: 100%; height: 100%; min-height: 290px; }
+    .beam { transform-origin: 50% 50%; animation: sweep 7s ease-in-out infinite alternate; }
+    @keyframes sweep { from { transform: rotate(-12deg); opacity: .25; } to { transform: rotate(10deg); opacity: .65; } }
+    .section-label { margin: 50px 0 14px; color: var(--yellow); font: 700 12px var(--mono); letter-spacing: .16em; text-transform: uppercase; }
+    .timeline { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin-top: 20px; }
+    .timeline-step { position: relative; padding: 18px 17px 14px; border-top: 2px solid var(--line); }
+    .timeline-step::before { content: ""; position: absolute; top: -7px; left: 16px; width: 11px; height: 11px; border: 2px solid var(--cyan); border-radius: 50%; background: var(--bg); }
+    .timeline-step.active { border-color: var(--cyan); }
+    .timeline-step.active::before { background: var(--cyan); box-shadow: 0 0 0 7px #6fe7db1c; }
+    .timeline-step b { display: block; margin-bottom: 6px; font-size: .95rem; }
+    .timeline-step p { margin: 0; color: var(--muted); font-size: .85rem; }
+    .scenario { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .terminal { min-height: 270px; padding: 19px; border: 1px solid #294157; border-radius: 13px; background: #07101b; color: #d8e3ef; font: .83rem/1.7 var(--mono); }
+    .terminal .dim { color: #68819a; }
+    .terminal .good { color: var(--green); }
+    .terminal .warn { color: var(--yellow); }
+    .terminal .bad { color: var(--pink); }
+    .result { display: grid; align-content: center; min-height: 270px; padding: 24px; border: 1px solid #294157; border-radius: 13px; background: linear-gradient(145deg, #122c39, #122038); }
+    .result .state { color: var(--green); font: 800 clamp(2rem, 5vw, 4rem)/1 var(--mono); letter-spacing: -.08em; }
+    .result p { max-width: 420px; color: var(--muted); }
+    .result strong { color: var(--ink); }
+    .result code { color: var(--yellow); }
+    .controls { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+    .controls button.primary { color: var(--bg); border-color: var(--cyan); background: var(--cyan); }
+    .controls button.primary:hover, .controls button.primary:focus-visible { color: var(--bg); background: #a0f3eb; }
+    .proof-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .proof { padding: 18px; border-left: 3px solid var(--cyan); background: #101d2d; }
+    .proof b { display: block; margin-bottom: 6px; }
+    .proof p { margin: 0; color: var(--muted); font-size: .9rem; }
+    footer { padding: 58px 0 70px; color: var(--muted); font-size: .9rem; }
+    footer code { color: var(--yellow); }
+    @media (max-width: 760px) {
+      .wrap { width: min(100% - 24px, 620px); }
+      header { padding-top: 42px; }
+      .install, .hero-grid, .scenario { display: block; }
+      .install button { margin-top: 12px; }
+      .lighthouse { margin-top: 18px; }
+      .timeline, .proof-grid { grid-template-columns: 1fr; }
+      .timeline-step { border-top: 0; border-left: 2px solid var(--line); padding: 12px 17px 18px 22px; }
+      .timeline-step::before { top: 15px; left: -7px; }
+      .timeline-step.active { border-color: var(--cyan); }
+    }
+    @media (prefers-reduced-motion: reduce) { .beam { animation: none; } }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <div class="eyebrow">Sourcemark · synthetic field guide</div>
+      <h1>The citation that refuses to die.</h1>
+      <p class="lede"><strong>Move the file. Edit the sentence. Test the agent.</strong> Sourcemark keeps the trail from a claim back to the evidence, then tells you when that trail drifts.</p>
+      <div class="install" aria-label="Install Sourcemark">
+        <code>python3 -m pip install sourcemark</code>
+        <button type="button" data-copy="python3 -m pip install sourcemark">copy install</button>
+      </div>
+    </header>
+
+    <section class="hero-grid" aria-label="What happens">
+      <article class="card"><div class="card-inner">
+        <h2>A tiny tool for a very modern problem.</h2>
+        <p>Answers outlive the file layout they were born in. Sourcemark stores enough context to find the evidence again, and enough session detail to catch a citation the agent never actually read.</p>
+        <div class="flow">
+          <div class="flow-step"><span class="step-no">1</span><div><strong>Anchor the evidence</strong><span>one command, one short token</span></div><span class="pill">MARK</span></div>
+          <div class="flow-step"><span class="step-no">2</span><div><strong>Let the repo change</strong><span>rename, insert, edit, repeat</span></div><span class="pill">MOVE</span></div>
+          <div class="flow-step"><span class="step-no">3</span><div><strong>Resolve the truth</strong><span>intact · shifted · moved · edited</span></div><span class="pill">PROVE</span></div>
+        </div>
+      </div></article>
+      <article class="card lighthouse" aria-label="Lighthouse illustration">
+        <svg viewBox="0 0 560 320" role="img" aria-label="A lighthouse shining a beam over a changing document">
+          <defs><linearGradient id="sky" x1="0" x2="0" y1="0" y2="1"><stop stop-color="#1a3855"/><stop offset="1" stop-color="#0b1727"/></linearGradient><linearGradient id="beam" x1="0" x2="1"><stop stop-color="#ffd166" stop-opacity="0"/><stop offset=".7" stop-color="#ffd166" stop-opacity=".38"/><stop offset="1" stop-color="#ffd166" stop-opacity="0"/></linearGradient></defs>
+          <rect width="560" height="320" fill="url(#sky)"/><circle cx="463" cy="58" r="25" fill="#ffd166" opacity=".9"/>
+          <g class="beam"><path d="M333 102 L560 44 L560 123 Z" fill="url(#beam)"/></g>
+          <path d="M0 264 Q110 220 230 267 T560 246 V320 H0Z" fill="#07101b"/>
+          <path d="M266 266 L294 136 H337 L366 266 Z" fill="#e6edf4"/><path d="M283 154 H350 L342 119 H291Z" fill="#ff8fb3"/>
+          <rect x="284" y="104" width="66" height="15" rx="4" fill="#6fe7db"/><rect x="300" y="72" width="34" height="33" fill="#1d3349" stroke="#6fe7db" stroke-width="4"/><path d="M294 72 H340" stroke="#edf2f7" stroke-width="6"/>
+          <path d="M306 167 V206 M328 167 V206 M302 206 H332" stroke="#0b1727" stroke-width="5"/>
+          <text x="25" y="44" fill="#edf2f7" font-family="monospace" font-size="13" letter-spacing="2">EVIDENCE HARBOR / 01</text>
+        </svg>
+      </article>
+    </section>
+
+    <div class="section-label">01 / Watch the mark survive</div>
+    <section class="card"><div class="card-inner">
+      <div class="timeline" aria-label="Citation lifecycle">
+        <div class="timeline-step active"><b>Read the line</b><p><code>docs/lighthouse.md:4-5</code><br>“Spare bulbs are stored…”</p></div>
+        <div class="timeline-step active"><b>Mark it</b><p><code>[sm:7f3a9c2b1d]</code><br>a compact handle, durable context</p></div>
+        <div class="timeline-step active"><b>Move + edit</b><p><code>ops/harbor-lighthouse.md:6-7</code><br>rename, two lines inserted, “ten” → “twelve”</p></div>
+        <div class="timeline-step active"><b>Resolve it</b><p><strong>edited / moved</strong><br>the claim still has a home</p></div>
+      </div>
+    </div></section>
+
+    <div class="section-label">02 / Run the synthetic incident</div>
+    <section class="scenario">
+      <div class="terminal" aria-label="Command transcript">
+        <div class="dim">$ python3 demos/demo.py</div>
+        <div>1. cited <span class="good">[sm:7f3a9c2b1d]</span> docs/lighthouse.md:4-5</div>
+        <div>2. renamed to ops/harbor-lighthouse.md</div>
+        <div>   added 2 lines above, edited a word inside</div>
+        <div>3. resolve → <span class="warn">edited</span> at ops/harbor-lighthouse.md:6-7</div>
+        <div>4. checking the agent's answer:</div>
+        <div>   <span class="good">verified</span>   lighthouse.md:6</div>
+        <div>   <span class="bad">unread_lines</span> roster.md:3</div>
+        <div>   <span class="bad">url_unsourced</span> made-up-spec</div>
+        <div class="dim" id="terminal-tail">-- one real citation, two useful refusals</div>
+      </div>
+      <div class="result" aria-live="polite">
+        <div class="eyebrow">Sourcemark verdict</div>
+        <div class="state" id="state">edited</div>
+        <p id="result-copy">The file moved and the sentence changed, but the evidence was found again. That is the useful kind of drama.</p>
+        <p><strong>One install.</strong> No service, account, sibling repo, or cloud round-trip required.</p>
+        <div class="controls">
+          <button class="primary" id="rerun" type="button">run walkthrough</button>
+          <button id="copy-command" type="button" data-copy="python3 demos/demo.py">copy demo command</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="section-label">03 / Why teams keep it around</div>
+    <section class="proof-grid">
+      <article class="proof"><b>Survives ordinary churn</b><p>Git renames, inserted lines, edited wording, and untracked moves are part of the synthetic path.</p></article>
+      <article class="proof"><b>Catches confident nonsense</b><p>Unread lines, made-up files, and unsourced links are visible failures instead of polished fiction.</p></article>
+      <article class="proof"><b>Stays local and inspectable</b><p>Python 3.11+, standard library only, SQLite ledger, MIT license. The fixture is synthetic by design.</p></article>
+    </section>
+
+    <footer>
+      <p>Want the source? Open <a href="../README.md">README.md</a> or run <code>python3 demos/demo.py</code> from a checkout. The walkthrough is intentionally self-contained so it can be read before installing anything.</p>
+    </footer>
+  </main>
+  <script>
+    const copyButtons = document.querySelectorAll('[data-copy]');
+    copyButtons.forEach((button) => button.addEventListener('click', async () => {
+      const original = button.textContent;
+      try {
+        await navigator.clipboard.writeText(button.dataset.copy);
+        button.textContent = 'copied ✓';
+      } catch (_) {
+        button.textContent = 'select it above';
+      }
+      window.setTimeout(() => { button.textContent = original; }, 1600);
+    }));
+    document.querySelector('#rerun').addEventListener('click', () => {
+      const state = document.querySelector('#state');
+      const copy = document.querySelector('#result-copy');
+      const tail = document.querySelector('#terminal-tail');
+      state.textContent = 'resolving…';
+      copy.textContent = 'Following the mark through the rename and the edit…';
+      tail.textContent = '-- replaying synthetic fixture';
+      window.setTimeout(() => {
+        state.textContent = 'edited';
+        copy.textContent = 'The file moved and the sentence changed, but the evidence was found again. That is the useful kind of drama.';
+        tail.textContent = '-- one real citation, two useful refusals';
+      }, 650);
+    });
+  </script>
+</body>
+</html>
