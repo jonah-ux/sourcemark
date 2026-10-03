@@ -42,7 +42,10 @@ The explicit export flag emits one sanitized `sourcemark/check/v1` JSON envelope
 `--json`. Its fields are `schema`, a bounded `state` (`ok`, `observed`, `partial`, or
 `timed_out`), fixed scalar counts (`total`, `passing`, `failing`, `unknown`, `observations`, and
 `timed_out`), and `sha256:` policy/session identities. It omits paths, quotes, transcript text,
-URLs, raw mark tokens, and ledger contents. Malformed JSONL is refused with exit 2 and no export.
+URLs, raw mark tokens, and ledger contents. Export checks the records it actually parses,
+using one open transcript stream. Malformed or non-object JSONL records and invalid UTF-8
+are refused with exit 2 and no export. A malformed or unreadable delegated Claude transcript
+also refuses the export. The ordinary check keeps its existing tolerant JSONL handling.
 The ordinary `check --json` output remains the detailed local report.
 
 ## `sourcemark verify-ledger`

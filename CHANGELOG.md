@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Validate export records during the actual transcript read instead of a separate preflight.
+  Reject malformed, non-object, invalid UTF-8, or unreadable delegated evidence without an
+  export, while preserving the ordinary transcript readers' handling of incomplete logs.
+
 - Add the explicit `check --export v1` boundary projection for sanitized citation/read-evidence
   results. The versioned envelope carries only bounded state, fixed scalar counts, and hashed
   policy/session identities; malformed input is refused without emitting report details.
