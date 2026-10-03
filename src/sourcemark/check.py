@@ -304,7 +304,14 @@ def _quotes_missing(c: Citation, obs: list, out: CitationCheck) -> bool:
         # "foo(...)" / "a … b": the agent elided text; every remaining fragment must be present.
         # "foo()" names the function, not an empty call; "**Gate 2**" bolds a prefix of the line.
         q = re.sub(r"(?<=\w)\(\)", "(...)", q)
-        parts = [squash(p) for p in re.split(r"\.\.\.|…|\*\*", q)]
+        # "{id}" in "/crm/v6/Shop/{id}/Leads" stands for whatever placeholder the template has: a
+        # bare name, not code (`{dest.relative_to(ROOT)}`), and not a near-miss of a brace
+        # expression the lines do have (`{shop_idX}` for `{shop_id}` is a misquote).
+        braces = re.findall(r"\{([^{}]*)\}", hay)
+        holes = [h for h in re.findall(r"\{(\w{1,40})\}", q)
+                 if h not in braces and not any(difflib.SequenceMatcher(None, h, b, autojunk=False).ratio() >= 0.8 for b in braces)]
+        hole_rx = "|".join(re.escape("{" + h + "}") for h in holes)
+        parts = [squash(p) for p in re.split(r"\.\.\.|…|\*\*" + ("|" + hole_rx if hole_rx else ""), q)]
         parts = [p for p in parts if len(p) >= 3]
         if parts and _in_order(hay, parts):
             out.quotes_found += 1
