@@ -5,6 +5,9 @@
 - Validate export records during the actual transcript read instead of a separate preflight.
   Reject malformed, non-object, invalid UTF-8, or unreadable delegated evidence without an
   export, while preserving the ordinary transcript readers' handling of incomplete logs.
+- Capture the root export input in a private temporary snapshot so an in-place rewrite
+  cannot change the format decision or omit citations. Large-input spill is bounded and
+  cleaned on success or failure.
 
 - Add the explicit `check --export v1` boundary projection for sanitized citation/read-evidence
   results. The versioned envelope carries only bounded state, fixed scalar counts, and hashed

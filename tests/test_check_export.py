@@ -3,6 +3,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -106,6 +107,73 @@ class CheckExportTest(unittest.TestCase):
                 self.assertEqual((code, err), (0, ""))
                 self.assertEqual(payload["state"], "observed")
                 self.assertEqual(len(reads), 1)
+
+    def test_export_format_and_records_use_the_same_snapshot(self):
+        from sourcemark import observe
+
+        original_detect = observe._detect_transcript_kind
+        for source in ("claude", "codex"):
+            with self.subTest(source=source):
+                events = self.reader_events(source)
+                content = (events[-1]["payload"]["content"] if source == "codex"
+                           else events[-1]["message"]["content"])
+                content[0]["text"] = "The mark is [sm:zzzzzzzzzz]."
+                transcript = self.transcript(events)
+                replacement = self.reader_events("codex" if source == "claude" else "claude")
+
+                def replace_after_detection(lines, **kwargs):
+                    kind = original_detect(lines, **kwargs)
+                    with open(transcript, "w", encoding="utf-8") as fh:
+                        for event in replacement:
+                            fh.write(json.dumps(event) + "\n")
+                    return kind
+
+                with mock.patch("sourcemark.observe._detect_transcript_kind", side_effect=replace_after_detection):
+                    code, payload, err = self.run_export(transcript)
+                self.assertEqual((code, err), (1, ""))
+                self.assertEqual(payload["state"], "partial")
+                self.assertEqual(payload["counts"]["total"], 1)
+                self.assertEqual(payload["counts"]["unknown"], 1)
+                self.assertNotIn("zzzzzzzzzz", json.dumps(payload))
+
+    def test_large_snapshot_is_private_and_closed_after_return_or_error(self):
+        from sourcemark import observe
+
+        original_spool = observe.tempfile.SpooledTemporaryFile
+        for malformed in (False, True):
+            with self.subTest(malformed=malformed):
+                events = self.reader_events("claude")
+                events[0]["synthetic_padding"] = "x" * (2 << 20)
+                transcript = self.transcript(events)
+                if malformed:
+                    with open(transcript, "a", encoding="utf-8") as fh:
+                        fh.write("synthetic-private-marker\n")
+                snapshots, modes = [], []
+
+                def tracked_spool(*args, **kwargs):
+                    snapshot = original_spool(*args, **kwargs)
+                    snapshots.append(snapshot)
+                    original_rollover = snapshot.rollover
+
+                    def record_rollover():
+                        original_rollover()
+                        if os.name == "posix":
+                            modes.append(stat.S_IMODE(os.fstat(snapshot._file.fileno()).st_mode))
+
+                    snapshot.rollover = record_rollover
+                    return snapshot
+
+                with mock.patch("sourcemark.observe.tempfile.SpooledTemporaryFile", side_effect=tracked_spool):
+                    if malformed:
+                        self.assert_export_refused(transcript)
+                    else:
+                        code, payload, err = self.run_export(transcript)
+                        self.assertEqual((code, err, payload["state"]), (0, "", "observed"))
+                self.assertTrue(snapshots)
+                self.assertTrue(all(snapshot._rolled and snapshot.closed for snapshot in snapshots))
+                if os.name == "posix":
+                    self.assertTrue(modes)
+                    self.assertEqual(set(modes), {0o600})
 
     def test_regular_check_keeps_tolerant_jsonl_behavior(self):
         for source in ("claude", "codex"):

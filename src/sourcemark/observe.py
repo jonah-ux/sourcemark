@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import fnmatch
 import functools
+import io
 import json
 import os
 import re
 import shlex
+import shutil
+import tempfile
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator
@@ -1134,6 +1137,7 @@ def _split_by_echo_markers(segments: list[str], stdout: str, printers: dict[int,
 
 
 _RUNTIME_NOTICES = ("<task-notification>", "<system-reminder>", "<command-name>", "<local-command")
+_STRICT_TRANSCRIPT_SPOOL_MAX_MEMORY = 1 << 20
 
 
 def _jsonl_record(line: str, line_number: int, *, strict_jsonl: bool) -> dict[str, Any] | None:
@@ -1649,27 +1653,43 @@ def _detect_transcript_kind(lines: Iterable[str], *, strict_jsonl: bool) -> bool
     return False
 
 
+def _read_strict_transcript(path: str) -> tuple[Session, list[tuple[str, str]]]:
+    """Read and parse one immutable private snapshot of a transcript.
+
+    The source path is opened once in binary mode. A spooled temporary file
+    keeps small transcripts in memory and rolls larger inputs to a private,
+    automatically removed temporary file before format detection or parsing.
+    """
+    with tempfile.SpooledTemporaryFile(
+        max_size=_STRICT_TRANSCRIPT_SPOOL_MAX_MEMORY, mode="w+b"
+    ) as snapshot:
+        with open(path, "rb") as source:
+            shutil.copyfileobj(source, snapshot)
+        snapshot.seek(0)
+        with io.TextIOWrapper(snapshot, encoding="utf-8") as lines:
+            is_codex = _detect_transcript_kind(lines, strict_jsonl=True)
+            lines.seek(0)
+            if is_codex:
+                return _read_codex_stream(lines, strict_jsonl=True)
+            return _read_claude_stream(lines, path, subagents=True, strict_jsonl=True)
+
+
 def read_transcript(
     path: str, *, strict_jsonl: bool = False
 ) -> tuple[Session, list[tuple[str, str]]]:
     """Read a Claude Code transcript or a Codex rollout, whichever ``path`` is.
 
-    Strict mode decodes and parses the same open stream used for format
-    detection, rejecting malformed JSONL records before export admission.
+    Strict mode decodes and parses the same private snapshot stream used for
+    format detection, rejecting malformed JSONL records before export
+    admission.
     """
-    errors = None if strict_jsonl else "replace"
-    if errors is None:
-        with open(path, encoding="utf-8") as fh:
-            is_codex = _detect_transcript_kind(fh, strict_jsonl=True)
-            fh.seek(0)
-            if is_codex:
-                return _read_codex_stream(fh, strict_jsonl=True)
-            return _read_claude_stream(fh, path, subagents=True, strict_jsonl=True)
+    if strict_jsonl:
+        return _read_strict_transcript(path)
 
     # Preserve the historical tolerant dispatch: the dispatcher probes with
     # replacement decoding, then the format-specific direct reader applies its
     # existing decoding policy (Claude strict UTF-8; Codex replacement UTF-8).
-    with open(path, encoding="utf-8", errors=errors) as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         is_codex = _detect_transcript_kind(fh, strict_jsonl=False)
     if is_codex:
         return read_codex_transcript(path)
