@@ -358,6 +358,26 @@ class StrictnessTest(unittest.TestCase):
         self.assertEqual(check_text("[#42](https://github.com/o/r/pull/42)", s).checks[0].verdict, "url_verified")
         self.assertEqual(check_text("[#43](https://github.com/o/r/pull/43)", s).checks[0].verdict, "url_unsourced")
 
+    def test_a_fetcher_that_ran_sources_its_url(self):
+        # From a real session: yt-dlp downloaded the clip; the agent linked the source video.
+        s = self._transcript(self._bash("yt-dlp -f mp4 https://www.youtube.com/watch?v=03HKX86LAuc -o clip.mp4",
+                                        "[youtube] 03HKX86LAuc: Downloading webpage\n[download] 100%\n"))
+        self.assertEqual(check_text("[clip](https://www.youtube.com/watch?v=03HKX86LAuc)", s).checks[0].verdict, "url_verified")
+        s = self._transcript(self._bash("curl -s https://api.example.com/v1/status | jq .state", '"ok"\n'))
+        self.assertEqual(check_text("per https://api.example.com/v1/status", s).checks[0].verdict, "url_verified")
+        # An echo returns what was typed; a fallback prints whatever happened.
+        for cmd in ("echo https://api.example.com/v1/status", "curl -s https://api.example.com/v1/status || echo down"):
+            s = self._transcript(self._bash(cmd, "https://api.example.com/v1/status\n" if cmd.startswith("echo") else "down\n"))
+            self.assertEqual(check_text("per https://api.example.com/v1/status", s).checks[0].verdict, "url_unsourced", cmd)
+
+    def test_share_parameters_name_the_same_page(self):
+        # From real sessions: Drive returned .../edit?usp=drivesdk; the agent linked .../edit.
+        s = self._transcript(self._bash("gws drive files get 1SL",
+                                        '{"webViewLink": "https://docs.google.com/spreadsheets/d/1SL/edit?usp=drivesdk"}'))
+        self.assertEqual(check_text("[sheet](https://docs.google.com/spreadsheets/d/1SL/edit)", s).checks[0].verdict, "url_verified")
+        self.assertEqual(normalize_url("https://youtu.be/abc?si=Zq9"), "https://youtu.be/abc")
+        self.assertEqual(normalize_url("https://example.com/a?usp=1"), "https://example.com/a?usp=1")
+
     def test_url_in_a_failed_result_is_not_sourced(self):
         s = self._transcript(self._bash("curl -f https://example.com/doc", "Exit code 22\ncurl: (22) https://example.com/doc 404", True))
         self.assertEqual(check_text("per https://example.com/doc", s).checks[0].verdict, "url_unsourced")
