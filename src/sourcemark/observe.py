@@ -1797,6 +1797,28 @@ def _header_chunks(items: list[dict[str, Any]], text: str) -> list[str] | None:
     return None
 
 
+_JS_PRINT_OUTPUT = re.compile(
+    r"text\(\s*(\w+)(?:\.status\s*===?\s*[\"']fulfilled[\"']\s*\?\s*\1\.value)?\.output\s*(?::[^)]*)?\)"
+)
+
+
+def _concatenated_evidence(code: str, items: list[dict[str, Any]], text: str, cwd: str | None, at: str | None) -> list[Observation] | None:
+    """A cell that prints each output and nothing else, in the order the commands were listed:
+    its output is what ``cmd1; cmd2; ...`` would have printed, so read it as that command."""
+    prints = _JS_PRINT_OUTPUT.findall(code)
+    if len(prints) != 1 or code.count("text(") != 1:
+        return None
+    dirs = {it["workdir"] for it in items}
+    if len(dirs) != 1:
+        return None
+    wd = next(iter(dirs))
+    ecwd = os.path.join(cwd, wd) if wd and cwd and not os.path.isabs(wd) else (wd or cwd)
+    cmds = [expand_assignments(it["cmd"]) for it in items]
+    if any(re.match(r"\s*cd\b", c) for c in cmds):
+        return None  # each call starts in the same directory; a joined command would not
+    return [o for o in from_shell("\n".join(cmds), text, ecwd, at) if o.line_numbers or o.tool != "Bash"]
+
+
 def _cell_batch_evidence(code: str, text: str, cwd: str | None, at: str | None, cut: bool) -> list[Observation] | None:
     """Evidence from a cell that ran several commands and printed each output whole, either as
     JSON results or under a header line per command. Lines that carry their own numbers always
@@ -1821,14 +1843,17 @@ def _cell_batch_evidence(code: str, text: str, cwd: str | None, at: str | None, 
     else:
         found = _header_chunks(items, text)
         if found is None:
-            return None
+            return _concatenated_evidence(code, items, text, cwd, at)
         chunks = list(found)
         exact = bool(re.search(r"text\(\s*`[^`]*\\n\$\{[\w.\[\]]+\.output\}`\s*\)", code))
     res: list[Observation] = []
     for it, chunk in zip(items, chunks):
         if chunk is None:
             continue
+        chunk_cut, chunk = _codex_uncut(chunk.lstrip("\n"))  # each output may carry its own cut banner
         chunk = chunk.rstrip("\n") + "\n"
+        if chunk_cut:
+            exact = False
         wd = it["workdir"]
         ecwd = os.path.join(cwd, wd) if wd and cwd and not os.path.isabs(wd) else (wd or cwd)
         cmd = expand_assignments(it["cmd"])
