@@ -1007,6 +1007,118 @@ class CodexRolloutTest(unittest.TestCase):
         self.assertNotIn(typed, " ".join(sess.urls))
 
 
+class VanishedGrepFileTest(unittest.TestCase):
+    """From real sessions: a one-file grep run in a worktree that has since been removed."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="sm-gone-")
+        self.addCleanup(shutil.rmtree, self.d, True)
+        os.makedirs(os.path.join(self.d, "lib"))
+        self.gone = os.path.join(self.d, "removed-worktree")
+        self.out = "217:  typescript: { ignoreBuildErrors: true },\n218-  eslint: {\n"
+
+    def nums(self, obs):
+        return {(os.path.relpath(o.path, self.d), n) for o in obs for n in (o.line_numbers or [])}
+
+    def test_one_file_grep_keeps_its_hits_after_the_file_is_gone(self):
+        obs = from_shell('grep -n -A1 "typescript" apps/web/next.config.js | head -20', self.out, self.gone)
+        self.assertEqual(self.nums(obs), {("removed-worktree/apps/web/next.config.js", 217), ("removed-worktree/apps/web/next.config.js", 218)})
+
+    def test_escaped_brackets_and_stderr_redirect(self):
+        cmd = r'grep -n "kind" apps/api/applicant/\[id\]/book/route.ts 2>/dev/null | head -20'
+        obs = from_shell(cmd, "476:  interview_kind,\n", self.gone)
+        self.assertEqual(self.nums(obs), {("removed-worktree/apps/api/applicant/[id]/book/route.ts", 476)})
+
+    def test_not_trusted_when_the_target_could_be_a_directory_or_glob(self):
+        for cmd in ('grep -n x lib', 'grep -n x lib/*.py', 'rg -n x lib/a.py', 'grep -rn x lib/a.py', 'grep -n -d recurse x lib/a.py'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.nums(from_shell(cmd, "12:x = 1\n", self.gone)), set())
+
+    def test_an_existing_directory_is_not_a_vanished_file(self):
+        os.makedirs(os.path.join(self.d, "lib", "pkg.d"))
+        self.assertEqual(self.nums(from_shell("grep -n x lib/pkg.d", "12:x = 1\n", self.d)), set())
+
+
+class PipedSourceTest(unittest.TestCase):
+    """From real sessions: `git show origin/main:F | grep -n`, `cat F | sed -n 'A,Bp'`."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="sm-src-")
+        self.addCleanup(shutil.rmtree, self.d, True)
+        os.makedirs(os.path.join(self.d, ".git"))
+        os.makedirs(os.path.join(self.d, "apps", "web"))
+        with open(os.path.join(self.d, "apps", "web", "page.tsx"), "w") as fh:
+            fh.write("\n".join(f"line {i}" for i in range(1, 200)) + "\n")
+
+    def nums(self, obs):
+        return {(os.path.relpath(o.path, self.d), n) for o in obs for n in (o.line_numbers or [])}
+
+    def lines(self, obs):
+        return {(os.path.relpath(o.path, self.d), o.line_start, len(o.lines)) for o in obs if o.line_numbers is None and o.lines}
+
+    def test_git_show_into_grep_numbers_the_shown_file(self):
+        cmd = 'git show origin/main:apps/web/page.tsx | grep -nE "requireTier|tier" | head -20'
+        obs = from_shell(cmd, "114:  requireTier('admin'),\n120:  tier,\n", self.d)
+        self.assertEqual(self.nums(obs), {("apps/web/page.tsx", 114), ("apps/web/page.tsx", 120)})
+
+    def test_git_show_path_is_from_the_top_of_the_work_tree(self):
+        sub = os.path.join(self.d, "apps")
+        obs = from_shell("git show HEAD:apps/web/page.tsx | grep -n x", "7:x\n", sub)
+        self.assertEqual(self.nums(obs), {("apps/web/page.tsx", 7)})
+        obs = from_shell("git -C apps show HEAD:./web/page.tsx | grep -n x", "7:x\n", self.d)
+        self.assertEqual(self.nums(obs), {("apps/web/page.tsx", 7)})
+
+    def test_slices_of_a_piped_file(self):
+        obs = from_shell("git show origin/main:apps/web/page.tsx | sed -n '760,762p'", "a\nb\nc\n", self.d)
+        self.assertEqual(self.lines(obs), {("apps/web/page.tsx", 760, 3)})
+        obs = from_shell("cat apps/web/page.tsx | head -40", "x\n" * 40, self.d)
+        self.assertEqual(self.lines(obs), {("apps/web/page.tsx", 1, 40)})
+        obs = from_shell("git show HEAD:apps/web/page.tsx", "x\n" * 199, self.d)
+        self.assertEqual(self.lines(obs), {("apps/web/page.tsx", 1, 199)})
+
+    def test_transforms_and_other_inputs_are_not_slices(self):
+        for cmd in (
+            "git show HEAD:apps/web/page.tsx | sed -n '/start/,/end/p'",
+            "git show HEAD:apps/web/page.tsx | tail -5",
+            "git show HEAD:apps/web/page.tsx | sed -n '5,9p' | grep x",
+            "git show HEAD:apps/web/page.tsx | awk 'NR>3'",
+            "git show --stat HEAD:apps/web/page.tsx | head -3",
+            "cat -v apps/web/page.tsx | head -3",
+            "cat apps/web/page.tsx | grep -n x apps/other.ts",
+        ):
+            with self.subTest(cmd=cmd):
+                obs = from_shell(cmd, "5:x\n", self.d)
+                self.assertEqual(self.nums(obs) | self.lines(obs), set())
+
+
+class GlobRootGrepTest(unittest.TestCase):
+    """From a real session: `grep -rn PAT ~/runtime/*/lib/hooks.py`, echo-fenced among other commands."""
+
+    def test_hits_under_an_unexpanded_glob_root_are_in_scope(self):
+        d = tempfile.mkdtemp(prefix="sm-glob-")
+        self.addCleanup(shutil.rmtree, d, True)
+        for kit in ("hook-surface", "other"):
+            os.makedirs(os.path.join(d, kit, "lib"))
+            with open(os.path.join(d, kit, "lib", "hooks.py"), "w") as fh:
+                fh.write("x\n" * 600)
+        hit = os.path.join(d, "hook-surface", "lib", "hooks.py")
+        cmd = f'echo "=== a ==="\ngrep -c x {d}/s.json | sed "s/^/  n: /"\necho "=== b ==="\ngrep -rn adapter {d}/*/lib/hooks.py | head -3 | cut -c1-160\necho "=== c ==="\nls -1 {d}'
+        out = f"=== a ===\n  n: 2\n=== b ===\n{hit}:575:  adapter = 1\n=== c ===\nhook-surface\n"
+        nums = {(o.path, n) for o in from_shell(cmd, out, d) for n in (o.line_numbers or [])}
+        self.assertEqual(nums, {(hit, 575)})
+
+    def test_a_hit_outside_the_glob_is_still_out_of_scope(self):
+        d = tempfile.mkdtemp(prefix="sm-glob-")
+        self.addCleanup(shutil.rmtree, d, True)
+        os.makedirs(os.path.join(d, "a", "lib"))
+        os.makedirs(os.path.join(d, "b"))
+        for f in ("a/lib/hooks.py", "b/hooks.py"):
+            with open(os.path.join(d, f), "w") as fh:
+                fh.write("x\n" * 20)
+        out = f"{d}/b/hooks.py:5:x\n"
+        self.assertEqual([o for o in from_shell(f"grep -rn x {d}/*/lib/hooks.py", out, d) if o.line_numbers], [])
+
+
 class SelfNumberedAndBatchTest(unittest.TestCase):
     """From real Codex rollouts: `nl -ba F | sed -n 'A,Bp'` and multi-command cells."""
 
@@ -1076,6 +1188,26 @@ class SelfNumberedAndBatchTest(unittest.TestCase):
         cut, text = _codex_uncut("Warning: truncated output (original token count: 99)\nTotal output lines: 9\n\n  10\ta\n  11\tb…20 tokens truncated…c\n  90\tz\n")
         self.assertTrue(cut)
         self.assertEqual(text, "  10\ta\n  90\tz\n")
+
+
+class QuoteShorthandTest(unittest.TestCase):
+    """From real sessions: `fn()` naming a function, `**Gate 2**` bolding a prefix of the line."""
+
+    def setUp(self):
+        self.s = Session(cwd="/r")
+        self.s.add(Observation("/r/v.py", 1522, ['    errors.extend(gate3_errors(documents["gate3"]))'], "Read", None))
+        self.s.add(Observation("/r/S.md", 5, ["Current source gate: **Gate 2 - Freeze core contracts**"], "Read", None))
+
+    def v(self, text):
+        return check_text(text, self.s).checks[0].verdict
+
+    def test_shorthand_quotes_match_the_line_they_abbreviate(self):
+        self.assertEqual(self.v("the gate is `gate3_errors()` (wired at `v.py:1522`)"), "verified")
+        self.assertEqual(self.v("`S.md:5` — `Current source gate: **Gate 2**` is stale"), "verified")
+
+    def test_a_wrong_name_or_wrong_text_is_still_caught(self):
+        self.assertEqual(self.v("the gate is `gate4_errors()` (wired at `v.py:1522`)"), "quote_mismatch")
+        self.assertEqual(self.v("`S.md:5` — `Current source gate: **Gate 3**` is stale"), "quote_mismatch")
 
 
 class MisquotedNameTest(unittest.TestCase):
