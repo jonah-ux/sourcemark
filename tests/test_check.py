@@ -1076,3 +1076,38 @@ class SelfNumberedAndBatchTest(unittest.TestCase):
         cut, text = _codex_uncut("Warning: truncated output (original token count: 99)\nTotal output lines: 9\n\n  10\ta\n  11\tb…20 tokens truncated…c\n  90\tz\n")
         self.assertTrue(cut)
         self.assertEqual(text, "  10\ta\n  90\tz\n")
+
+
+class MisquotedNameTest(unittest.TestCase):
+    """A bare name is a mention, not a quote, unless it misquotes a name that WAS read."""
+
+    def setUp(self):
+        self.s = Session(cwd="/r")
+        self.s.add(Observation("/r/a.yaml", 20, ["rules:", "  forbidden_patterns:", "    - x", "  self_correct: true", "G2_STATUS_STALE = 1", "run hermes-tag-install now"], "Read", None))
+
+    def v(self, text):
+        return check_text(text, self.s).checks[0].verdict
+
+    def test_a_misquoted_name_is_caught(self):
+        self.assertEqual(self.v("a.yaml:21 has `forbidden_patternsX:`"), "quote_mismatch")
+        self.assertEqual(self.v("a.yaml:24 sets `G2_STATUS_STALEX`"), "quote_mismatch")
+
+    def test_mentions_and_prose_variants_are_not_flagged(self):
+        for text in (
+            "a.yaml:21 has `forbidden_patterns:`",  # exact
+            "a.yaml:21 lists each `forbidden_pattern`",  # singular in prose
+            "a.yaml:25 hands off to `hermes_tag_install`",  # separator variant
+            "a.yaml:21 is parsed by `undici`",  # a mention of something else
+            "a.yaml:21 relates to `setup.py`",  # another file
+        ):
+            self.assertEqual(self.v(text), "verified", text)
+
+    def test_names_are_not_judged_against_text_known_only_by_line_number(self):
+        s = Session(cwd="/r")
+        s.add(Observation("/r/b.py", 0, [None] * 5, "Bash-range", None, line_numbers=list(range(10, 15))))
+        s.add(Observation("/r/b.py", 30, ["def fetch_all_rows(): pass"], "Read", None))
+        self.assertEqual(check_text("b.py:12 defines `fetch_all_rowz`", s).checks[0].verdict, "verified")
+
+    def test_timestamped_backup_paths_are_extracted(self):
+        got = [(c.path, c.line_start) for c in extract("See /h/.cfg/config.yaml.bak-20260902-154450:80.")]
+        self.assertEqual(got, [("/h/.cfg/config.yaml.bak-20260902-154450", 80)])
