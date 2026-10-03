@@ -1158,6 +1158,23 @@ class MidCommandCdTest(unittest.TestCase):
         self.assertNotIn(("apps/web/src/app/Ads.tsx", 3), got)
 
 
+class AttachedOptionValueTest(unittest.TestCase):
+    """From a real session: `git grep -nA5 PAT -- dir`, where -n hides in a cluster with a value."""
+
+    def test_line_numbers_are_seen_in_a_cluster_with_a_value(self):
+        d = tempfile.mkdtemp(prefix="sm-opt-")
+        self.addCleanup(shutil.rmtree, d, True)
+        os.makedirs(os.path.join(d, "app"))
+        with open(os.path.join(d, "app", "page.tsx"), "w") as fh:
+            fh.write("x\n" * 80)
+        out = "app/page.tsx:65:const OPTS = {\napp/page.tsx-66-  ...BASE,\napp/page.tsx-67-  maxStaleMs: 1,\n"
+        for cmd in ("git grep -nA5 'OPTS\\s*=' -- app | head -10", "grep -rnA2 OPTS app"):
+            with self.subTest(cmd=cmd):
+                nums = {n for o in from_shell(cmd, out, d) for n in (o.line_numbers or [])}
+                self.assertEqual(nums, {65, 66, 67})
+        self.assertEqual([o for o in from_shell("grep -rNA2 OPTS app", out, d) if o.line_numbers], [])
+
+
 class SelfNumberedAndBatchTest(unittest.TestCase):
     """From real Codex rollouts: `nl -ba F | sed -n 'A,Bp'` and multi-command cells."""
 
