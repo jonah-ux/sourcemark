@@ -23,6 +23,7 @@ Verdicts (per citation):
 from __future__ import annotations
 
 import os
+import difflib
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable
@@ -35,6 +36,37 @@ PASSING = {"verified", "file_only", "url_verified", "token_ok"}
 # Only code EXPRESSIONS are checked as quotes. A bare identifier or dotted name
 # (`content_hash`, `c.text`) is usually a reference to a concept, not a quotation.
 _CODEISH = re.compile(r"\s|[()=\[\]{}<>;,'\"+*]|->|=>")
+# A bare identifier is still checked, softly: it must appear SOMEWHERE in what was read of the
+# file. A name that occurs nowhere in the file as read was not taken from it.
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+
+
+def _near_miss(tok: str, text: str) -> str | None:
+    """A token in ``text`` that ``tok`` misquotes: one or two characters added, dropped or
+    changed at the end or inside a long name (``forbidden_patternsX`` for ``forbidden_patterns``)."""
+    if len(tok) < 8:
+        return None
+    for cand in set(re.findall(r"[A-Za-z_][\w\-]{6,}", text)):
+        if cand == tok or abs(len(cand) - len(tok)) > 2:
+            continue
+        flat = lambda x: re.sub(r"[-_.]", "", x).lower()  # noqa: E731
+        if flat(cand).rstrip("s") == flat(tok).rstrip("s"):
+            continue  # `pattern` / `patterns`, `tag_install` / `tag-install`: prose, not a misquote
+        if difflib.SequenceMatcher(None, cand, tok, autojunk=False).ratio() >= 1 - 2.5 / max(len(cand), len(tok)) and cand[:4] == tok[:4]:
+            return cand
+    return None
+
+
+def _soft_checkable(tok: str) -> bool:
+    """A single name worth the soft check: letters, 4+ chars, and not a file name or path (a
+    sentence may name another file that the cited one never spells out)."""
+    if len(tok) < 4 or not re.search(r"[A-Za-z]", tok) or re.search(r"\s", tok):
+        return False
+    if "/" in tok or re.fullmatch(r"[\w.\-]+\.[A-Za-z][A-Za-z0-9]{0,7}", tok) and not _IDENT.fullmatch(tok):
+        return False
+    if "." in tok and _IDENT.fullmatch(tok) and re.search(r"\.[A-Za-z]{1,4}$", tok) and tok.count(".") == 1:
+        return False  # `setup.py`-style file name
+    return bool(re.fullmatch(r"[\w.\-]+", tok))
 
 
 @dataclass
@@ -213,9 +245,24 @@ def _quotes_missing(c: Citation, obs: list, out: CitationCheck) -> bool:
     if not window:
         return False  # the lines were seen but their text was not attributable (Bash-range)
     hay = squash("\n".join(window))
+    read_all: str | None = None
     for q in c.claimed_quotes:
         if not _CODEISH.search(q):
-            continue
+            tok = q.strip().strip("'\"").rstrip(":")
+            if not _soft_checkable(tok):
+                continue
+            else:
+                if read_all is None:
+                    texts = [t for o in obs for t in (o.lines or [])]
+                    # Only judge against complete text: lines known by number alone could hold it.
+                    read_all = "" if any(t is None for t in texts) else "\n".join(texts)
+                if not read_all or re.search(rf"(?<![A-Za-z0-9_]){re.escape(tok)}(?![A-Za-z0-9_])", read_all):
+                    continue  # present, or not judgeable: a bare name is usually a mention
+                near = _near_miss(tok, read_all)
+                if near is None:
+                    continue  # absent but nothing like it was read: a mention of something else
+                out.quotes_checked += 1  # absent, while a near-identical name WAS read: a misquote
+                continue
         out.quotes_checked += 1
         # "foo(...)" / "a … b": the agent elided text; every remaining fragment must be present.
         parts = [squash(p) for p in re.split(r"\.\.\.|…", q)]
