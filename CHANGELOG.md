@@ -15,7 +15,8 @@
 - Require annotated release identity, source tests, installed export regressions, and exact
   demo-result assertions before publication.
 - Include the native conformance manifest in source archives, exercise conformance with
-  installed consumers, and distinguish generic downstream provenance from adapter acceptance.
+  installed consumers, and distinguish the pinned downstream adapter source from published
+  package adoption.
 
 ### Codex coverage
 

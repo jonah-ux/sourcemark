@@ -70,6 +70,7 @@ jobs:
           "$RUNNER_TEMP/sourcemark-release-wheel/bin/sourcemark" --version
           "$RUNNER_TEMP/sourcemark-release-wheel/bin/sourcemark" --help
           "$RUNNER_TEMP/sourcemark-release-wheel/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -p test_check_export.py -v
+          "$RUNNER_TEMP/sourcemark-release-wheel/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -p test_agent_systems_lab_conformance.py -v
           "$RUNNER_TEMP/sourcemark-release-wheel/bin/python" "$GITHUB_WORKSPACE/demos/demo.py" --installed > sourcemark-wheel-demo.txt
           "$RUNNER_TEMP/sourcemark-release-wheel/bin/python" -c 'from pathlib import Path; import json; result = json.loads(Path("sourcemark-wheel-demo.txt").read_text().splitlines()[-1]); assert result["ok"] is True and result["moved"] is True and result["resolve"] == "edited", result; assert result["citations"] == {"unread_lines": 1, "unresolved": 1, "url_unsourced": 1, "url_verified": 1, "verified": 1}, result; assert result["check_export"]["schema"] == "sourcemark/check/v1" and result["check_export"]["state"] == "partial", result; assert result["check_export"]["counts"] == {"failing": 3, "observations": 1, "passing": 2, "timed_out": 0, "total": 5, "unknown": 0}, result; print(json.dumps(result, sort_keys=True))'
       - name: Verify source consumer
@@ -85,6 +86,7 @@ jobs:
           "$RUNNER_TEMP/sourcemark-release-sdist/bin/sourcemark" --version
           "$RUNNER_TEMP/sourcemark-release-sdist/bin/sourcemark" --help
           "$RUNNER_TEMP/sourcemark-release-sdist/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -p test_check_export.py -v
+          "$RUNNER_TEMP/sourcemark-release-sdist/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -p test_agent_systems_lab_conformance.py -v
           "$RUNNER_TEMP/sourcemark-release-sdist/bin/python" "$GITHUB_WORKSPACE/demos/demo.py" --installed > sourcemark-sdist-demo.txt
           "$RUNNER_TEMP/sourcemark-release-sdist/bin/python" -c 'from pathlib import Path; import json; result = json.loads(Path("sourcemark-sdist-demo.txt").read_text().splitlines()[-1]); assert result["ok"] is True and result["moved"] is True and result["resolve"] == "edited", result; assert result["citations"] == {"unread_lines": 1, "unresolved": 1, "url_unsourced": 1, "url_verified": 1, "verified": 1}, result; assert result["check_export"]["schema"] == "sourcemark/check/v1" and result["check_export"]["state"] == "partial", result; assert result["check_export"]["counts"] == {"failing": 3, "observations": 1, "passing": 2, "timed_out": 0, "total": 5, "unknown": 0}, result; print(json.dumps(result, sort_keys=True))'
       - name: Publish release assets
