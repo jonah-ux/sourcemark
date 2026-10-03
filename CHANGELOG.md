@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 — 2026-10-03
 
+- Verify CI/release demos against the installed package with `--installed`, without the
+  source-checkout import fallback.
 - Validate export records during the actual transcript read instead of a separate preflight.
   Reject malformed, non-object, invalid UTF-8, or unreadable delegated evidence without an
   export, while preserving the ordinary transcript readers' handling of incomplete logs.

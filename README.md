@@ -13,7 +13,7 @@ Python 3.11+ · Zero runtime dependencies · MIT · Local only · Early release
 
 ```console
 python3 -m venv .venv && . .venv/bin/activate
-python3 -m pip install 'git+https://github.com/jonah-ux/sourcemark.git@v0.5.0'
+python3 -m pip install 'git+https://github.com/jonah-ux/sourcemark.git@v0.5.1'
 sourcemark --version
 python3 demos/demo.py        # 30-second synthetic walkthrough (from a checkout)
 ```
@@ -33,7 +33,7 @@ That command creates and removes its own temporary git repository, prints each s
 non-zero if the moved/edited citation or the deliberate checker refusals do not appear.
 
 Each [release](https://github.com/jonah-ux/sourcemark/releases) also ships a wheel, an sdist and
-`SHA256SUMS`; `pip install sourcemark-0.5.0-py3-none-any.whl` after checking the hash. Python 3.11+,
+`SHA256SUMS`; `pip install sourcemark-0.5.1-py3-none-any.whl` after checking the hash. Python 3.11+,
 no dependencies.
 
 ## Usage
