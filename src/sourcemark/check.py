@@ -25,7 +25,7 @@ from __future__ import annotations
 import os
 import difflib
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Iterable
 
 from .cite import Citation, extract
@@ -311,6 +311,10 @@ def _judge_lines(c: Citation, obs: list, out: CitationCheck) -> str:
 
 
 def check_citation(c: Citation, session: Session, *, now: bool = False, ledger: Any = None) -> CitationCheck:
+    if c.root and c.path:
+        rooted = os.path.join(c.root, c.path[2:] if c.path.startswith("./") else c.path)
+        if _match_path(rooted, session) or os.path.isfile(os.path.expanduser(rooted)):
+            c = replace(c, path=rooted)
     out = CitationCheck(raw=c.raw, verdict="nonexistent", path=c.path, line_start=c.line_start, line_end=c.line_end)
     if c.token:
         if ledger is None:
@@ -400,6 +404,18 @@ def check_citation(c: Citation, session: Session, *, now: bool = False, ledger: 
                 else:
                     out.verdict, out.detail = "delegated", "only a subagent read these lines; the orchestrator relayed them"
                 return out
+        # A relative path can name several read copies (one repo in several worktrees), and the
+        # working directory picked one whose reads miss these lines; the claim stands if another
+        # copy has them. Only for a path with a directory part: a bare README.md or notes.md
+        # names unrelated files, and without a quote nothing shows which one was meant.
+        rel_dir = "/" in os.path.normpath(os.path.expanduser(c.path)).lstrip("./")
+        for alt in _other_copies(c.path, session, hit) if rel_dir else []:
+            alt_obs = [o for o in session.for_path(alt) if not o.delegated]
+            probe = CitationCheck(raw=c.raw, verdict="")
+            if alt_obs and _judge_lines(c, alt_obs, probe) == "verified":
+                hit, obs, out.resolved_path, out.verdict = alt, alt_obs, alt, "verified"
+                out.lines_read, out.detail = probe.lines_read, "matched another read copy of this path"
+                break
 
     # Quote check: code-like quotes next to the citation must appear in the lines read.
     if out.verdict in ("verified", "partial") and _quotes_missing(c, obs, out):
