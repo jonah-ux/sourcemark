@@ -163,6 +163,15 @@ def _match_path(cited: str, session: Session, lines: set[int] | None = None) -> 
     return None
 
 
+def _other_copies(cited: str, session: Session, chosen: str) -> list[str]:
+    """Other read files a RELATIVE citation could name (``runtime/lib/x.py`` in two worktrees)."""
+    cited_x = os.path.expanduser(cited)
+    if os.path.isabs(cited_x):
+        return []
+    rel = os.path.normpath(cited_x[2:] if cited_x.startswith("./") else cited_x)
+    return sorted(p for p in session.paths() if p != chosen and (p == rel or p.endswith(os.sep + rel)))
+
+
 def _is_local_endpoint(url: str) -> bool:
     """A local/private SERVICE address. A document path on a private host is still a citation."""
     import ipaddress
@@ -395,6 +404,16 @@ def check_citation(c: Citation, session: Session, *, now: bool = False, ledger: 
     # Quote check: code-like quotes next to the citation must appear in the lines read.
     if out.verdict in ("verified", "partial") and _quotes_missing(c, obs, out):
         out.verdict = "quote_mismatch"
+        # A relative path can name several copies the session read (a repo and its worktrees);
+        # the claim stands if one of them has these lines with this text.
+        for alt in _other_copies(c.path, session, hit):
+            alt_obs = [o for o in session.for_path(alt) if not o.delegated]
+            probe = CitationCheck(raw=c.raw, verdict="")
+            if alt_obs and _judge_lines(c, alt_obs, probe) == "verified" and not _quotes_missing(c, alt_obs, probe):
+                out.verdict, out.resolved_path = "verified", alt
+                out.lines_read, out.quotes_checked, out.quotes_found = probe.lines_read, probe.quotes_checked, probe.quotes_found
+                out.detail = "matched another read copy of this path"
+                break
 
     if now:
         cited = set(range(c.line_start, (c.line_end or c.line_start) + 1))

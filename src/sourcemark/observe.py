@@ -525,9 +525,12 @@ def _numbered(args: list[str]) -> bool:
     )
 
 
-def _grep_evidence(argv: list[str], stdout: str, cwd: str | None, at: str | None, *, alone: bool, other_printers: bool = False) -> list[Observation] | None:
+def _grep_evidence(argv: list[str], stdout: str, cwd: str | None, at: str | None, *, alone: bool, other_printers: bool = False, edge: str | None = None) -> list[Observation] | None:
     """Line evidence from a grep/rg run, or None when its output cannot be read as numbered hits:
-    no -n, or other commands printed into the same stdout (a linter's ``f.py:97:5:`` looks alike)."""
+    no -n, or other commands printed into the same stdout (a linter's ``f.py:97:5:`` looks alike).
+
+    ``edge`` ("first"/"last"): the grep printed first or last of several commands run one after
+    another, and nothing else in the command prints bare numbered lines."""
     if not argv:
         return None
     tool, args = os.path.basename(argv[0]), argv[1:]
@@ -536,7 +539,12 @@ def _grep_evidence(argv: list[str], stdout: str, cwd: str | None, at: str | None
     single = None if tool == "git-grep" else _single_target(args, cwd, tool)
     if single and other_printers:
         # A single-file grep prints bare "N:text"; another file printed into the same stdout
-        # (a second grep, a cat) would have its lines credited to this file.
+        # (a second grep, a cat) would have its lines credited to this file. Unless the grep ran
+        # first or last: then its hits are the run of ascending "N:text" lines at that end.
+        match = _grep_matcher(args, tool) if edge else None
+        block = _edge_block(stdout, edge, match) if match else []
+        if block:
+            return from_grep_text("\n".join(block) + "\n", cwd, "Bash", at, single_file=single)
         return [Observation(single, 0, [], "Bash-touch", at, line_numbers=[])]
     obs = from_grep_text(stdout, cwd, "Bash", at, single_file=single, roots=_grep_targets(args, cwd, tool))
     if alone:
@@ -553,6 +561,32 @@ def _grep_evidence(argv: list[str], stdout: str, cwd: str | None, at: str | None
         if pairs:
             kept.append(Observation(o.path, pairs[0][0], [t for _, t in pairs], o.tool, o.at, line_numbers=[n for n, _ in pairs]))
     return kept
+
+
+def _edge_block(stdout: str, edge: str, match) -> list[str]:
+    """The run of one-file grep output at the start or end of ``stdout``: "N:hit" lines whose text
+    matches the pattern, "N-context" lines and "--" separators, numbers strictly ascending."""
+    lines = stdout.rstrip("\n").split("\n")
+    seq = lines if edge == "first" else lines[::-1]
+    block: list[str] = []
+    last: int | None = None
+    for raw in seq:
+        if raw == "--":
+            block.append(raw)
+            continue
+        b = _GREP_BARE.match(raw)
+        if not b:
+            break
+        n = int(b.group("line"))
+        if last is not None and (n <= last if edge == "first" else n >= last):
+            break
+        if raw[len(b.group("line"))] == ":" and not match(b.group("text")):
+            break
+        block.append(raw)
+        last = n
+    while block and block[-1] == "--":
+        block.pop()
+    return block if edge == "first" else block[::-1]
 
 
 def _grep_matcher(args: list[str], tool: str):
@@ -613,6 +647,14 @@ _LINE_FILTER = re.compile(
     r"(?:grep|rg)(?:\s+-(?![\w-]*[onbcABC])[\w-]+)*\s+(?:'[^']*'|\"[^\"]*\"|\S+))$"
 )
 _NUMBERED_LINE = re.compile(r"^\s*(\d+)\t(.*)$")
+# `nl -ba` and `cat -n` right-align the number in six columns, then a tab. Text from other
+# commands rarely has that exact shape; a TSV line such as "12\tfoo" does not.
+_NL_EXACT = re.compile(r"^( {5}\d| {4}\d{2}| {3}\d{3}| {2}\d{4}| \d{5}|\d{6,})\t(.*)$")
+# Commands that can print lines of any shape, numbered ones included.
+_ANY_SHAPE = re.compile(
+    r"(?:^|[|;&(]\s*)(?:\S*/)?(?:nl|awk|gawk|mawk|perl|python\d*(?:\.\d+)?|node|ruby|php|sh|bash|zsh|pr|less|bat|xargs"
+    r"|column|paste|while|for|until|do|eval|source|ssh|sudo)\b|\bcat\s+-\w*n|\$\(|`|printf\s+\S*%"
+)
 
 
 def _git_top(d: str) -> str | None:
@@ -718,8 +760,33 @@ def _self_numbered(seg: str, cwd: str | None) -> str | None:
     return os.path.normpath(path if os.path.isabs(path) or not cwd else os.path.join(cwd, path))
 
 
-def _numbered_lines(text: str) -> list[tuple[int, str]]:
-    return [(int(m.group(1)), m.group(2)) for m in map(_NUMBERED_LINE.match, text.split("\n")) if m]
+def _numbered_lines(text: str, exact: bool = False) -> list[tuple[int, str]]:
+    rx = _NL_EXACT if exact else _NUMBERED_LINE
+    return [(int(m.group(1)), m.group(2)) for m in map(rx.match, text.split("\n")) if m]
+
+
+_FOR = re.compile(r"\bfor\s+([A-Za-z_]\w*)\s+in\s+([^;\n]*?)\s*(?:;|\n)\s*do\s+(.*?)\s*(?:;|\n)?\s*done\b", re.S)
+_SAFE_WORD = re.compile(r"[\w./@:+,=-]+")
+
+
+def _unroll_for(command: str) -> str:
+    """``for f in a b; do echo "== $f"; nl -ba "$f"; done`` -> the body once per word, in order,
+    which is what the loop ran. Only plain word lists and bodies that use the variable plainly
+    (``$f``, ``${f}``) are unrolled; anything else is left as it was."""
+    def expand(m: re.Match[str]) -> str:
+        var, words, body = m.group(1), m.group(2), m.group(3)
+        try:
+            items = shlex.split(words)
+        except ValueError:
+            return m.group(0)
+        if not items or len(items) > 50 or not all(_SAFE_WORD.fullmatch(w) for w in items):
+            return m.group(0)
+        if re.search(r"\b(?:for|while|until|do|done)\b", body) or re.search(rf"\$\{{{var}[^}}]*[^\w}}]", body):
+            return m.group(0)  # nested loops, ${f%...}-style expansions
+        pat = re.compile(rf"\$\{{{var}\}}|\${var}(?!\w)")
+        return "; ".join(pat.sub(lambda _m, w=w: w, body) for w in items)
+
+    return _FOR.sub(expand, command) if "for " in command else command
 
 
 _CD_SEG = re.compile(r"""cd(?:\s+(?P<dir>'[^']*'|"[^"]*"|[^\s'"]+))?(?:\s+2>\s*/dev/null)?""")
@@ -756,6 +823,11 @@ def _segment_cwds(segments: list[str], cwd: str | None) -> list[str | None] | No
 
 def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None) -> list[Observation]:
     """Recognize simple file-printing commands whose stdout is a known file slice."""
+    sh = _SHELL_C.fullmatch(_unwrap(command.strip()))
+    if sh:
+        script = sh.group(1) if sh.group(1) is not None else sh.group(2)
+        return from_shell(_CD.sub("", script, count=1), stdout, effective_cwd(script, cwd), at)
+    command = _unroll_for(command)
     out: list[Observation] = []
     owner: dict[int, int] = {}  # index in ``out`` -> index of the segment that printed it
     segments = [_unwrap(x) for x in _split_unquoted(command, newlines=True)]
@@ -779,7 +851,22 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
             for segs, chunk in fenced or []:
                 if segs == [k]:
                     return _grep_evidence(gargv, "\n".join(chunk) + "\n", cwds[k], at, alone=True)
-        return _grep_evidence(gargv, stdout, cwds[k], at, alone=len(loud) == 1, other_printers=len(printers) > 1)
+        return _grep_evidence(gargv, stdout, cwds[k], at, alone=len(loud) == 1, other_printers=len(printers) > 1, edge=edge_of(k))
+
+    def edge_of(k: int) -> str | None:
+        """"first"/"last" when segment k printed first/last and no other segment can print
+        bare numbered lines (another grep, a self-numbered printer, a script)."""
+        order = [i for i, s in enumerate(segments) if s and not _SILENT.match(s) and not re.fullmatch(r"echo(?:\s+(?:\"\"|''))?", s)]
+        if not order or k not in (order[0], order[-1]):
+            return None
+        for i in order:
+            s = segments[i]
+            if i == k:
+                continue
+            head = (s.split() or [""])[0].rsplit("/", 1)[-1]
+            if head in ("grep", "rg", "git") and re.search(r"\bgrep\b|^rg\b", s) or i in numbered or _ANY_SHAPE.search(s) or _self_numbered(s, cwds[i]):
+                return None
+        return "first" if k == order[0] else "last"
 
     numbered: dict[int, str] = {}  # segment -> file, for self-numbered printers (nl -ba, cat -n)
     for k, seg in enumerate(segments):
@@ -878,31 +965,44 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
     if len(out) > 1 or (out and len(loud) > 1):
         split = _split_by_echo_markers(segments, stdout, {owner[i]: o for i, o in enumerate(out)})
         if split is not None:
-            return extra + split
+            # Slices the markers could not separate still printed their line NUMBERS.
+            placed = {o.path for o in split if o.tool == "Bash" and o.lines}
+            return extra + split + [o for o in _printed_ranges(out, owner, segments, stdout, at) if o.path not in placed]
         # Several things printed into one stdout: the TEXT cannot be attributed to lines. File-level
         # evidence, plus, for an unpiped `sed -n A,Bp f`, the line NUMBERS it printed (text unknown,
         # so quotes on those lines are not judged from it).
         res = extra + [Observation(o.path, 0, [], "Bash-touch", at, line_numbers=[]) for o in out]
-        if stdout.strip():
-            for i, o in enumerate(out):
-                seg = segments[owner[i]]
-                rng = re.fullmatch(r"sed\s+-n\s+'?(\d+),(\d+)p'?\s+\S+", seg.strip())
-                if rng and "|" not in seg:
-                    a, b = int(rng.group(1)), int(rng.group(2))
-                    n_file = _line_count(o.path)
-                    if n_file is not None:
-                        b = min(b, n_file)
-                    if a <= b and b - a < 5000:
-                        res.append(Observation(o.path, 0, [None] * (b - a + 1), "Bash-range", at, line_numbers=list(range(a, b + 1))))
-        return res
+        return res + _printed_ranges(out, owner, segments, stdout, at)
     return extra + out
+
+
+def _printed_ranges(out: list[Observation], owner: dict[int, int], segments: list[str], stdout: str, at: str | None) -> list[Observation]:
+    """Line NUMBERS (not text) printed by each unpiped ``sed -n A,Bp f`` in a shared stdout."""
+    res: list[Observation] = []
+    if not stdout.strip():
+        return res
+    for i, o in enumerate(out):
+        seg = segments[owner[i]]
+        rng = re.fullmatch(r"sed\s+-n\s+'?(\d+),(\d+)p'?\s+\S+", seg.strip())
+        if rng and "|" not in seg:
+            a, b = int(rng.group(1)), int(rng.group(2))
+            n_file = _line_count(o.path)
+            if n_file is not None:
+                b = min(b, n_file)
+            if a <= b and b - a < 5000:
+                res.append(Observation(o.path, 0, [None] * (b - a + 1), "Bash-range", at, line_numbers=list(range(a, b + 1))))
+    return res
 
 
 # Commands that run another command unchanged: `timeout 60 rg -n ...` is the rg.
 _WRAPPER = re.compile(
     r"^(?:(?:timeout(?:\s+-[sk]\s*\S+|\s+--\S+)*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+|\s+-\d+)?"
-    r"|command(?=\s+[^-\s])|time|stdbuf(?:\s+-[ioe]\S+)+|env(?:\s+[A-Za-z_]\w*=\S*)+)\s+)+"
+    r"|command(?=\s+[^-\s])|time|stdbuf(?:\s+-[ioe]\S+)+|env(?:\s+[A-Za-z_]\w*=\S*)+"
+    r"|(?:\S*/)?worker-lifecycle\s+run\s+(?:\S+\s+)*?--(?=\s))\s+)+"
 )
+# `bash -lc '...'` / `sh -c "..."`: the script is the command. Double quotes only when nothing in
+# them would be expanded by the outer shell.
+_SHELL_C = re.compile(r"(?:\S*/)?(?:ba|z)?sh\s+(?:-l\s+)?-l?c\s+(?:'([^']*)'|\"([^\"$`\\]*)\")\s*")
 
 
 def _unwrap(seg: str) -> str:
@@ -912,16 +1012,44 @@ def _unwrap(seg: str) -> str:
 _HEREDOC_START = re.compile(r"<<(?P<dash>-?)\s*(['\"]?)(?P<word>[A-Za-z_]\w*)\2")
 
 
+_PLAIN_RUN = re.compile(r"[^'\"\\<\n;&|]+")  # nothing in it can start a quote, separator or heredoc
+_DQ_RUN = re.compile(r'[^"\\]+')
+
+
 def _split_unquoted(command: str, *, pipes: bool = False, newlines: bool = False) -> list[str]:
     """Split a shell command on ``&&``, ``;``, ``||`` (and ``|``/newlines if asked) outside quotes.
 
     A grep pattern like ``"a && b"`` is one argument, not two commands. If the quotes never
     balance (an apostrophe in a heredoc or comment), fall back to splitting on every separator."""
+    return list(_split_unquoted_cached(command, pipes, newlines))
+
+
+@functools.lru_cache(maxsize=8192)
+def _split_unquoted_cached(command: str, pipes: bool, newlines: bool) -> tuple[str, ...]:
     command = command.replace("\\\n", " ")  # line continuations
     seps = ["&&", "||", ";"] + (["|"] if pipes else []) + (["\n"] if newlines else [])
     out, cur, q, i, n = [], [], None, 0, len(command)
     heredocs: list[tuple[str, bool]] = []  # (terminator, tabs stripped) opened on this line
     while i < n:
+        # Skip plain runs in one step; only the characters below can change the state.
+        if not q:
+            m = _PLAIN_RUN.match(command, i)
+            if m:
+                cur.append(m.group())
+                i = m.end()
+                continue
+        elif q == "'":
+            j = command.find("'", i)
+            if j != i:
+                cur.append(command[i:] if j == -1 else command[i:j])
+                i = n if j == -1 else j
+                continue
+        else:
+            m = _DQ_RUN.match(command, i)
+            if m:
+                cur.append(m.group())
+                i = m.end()
+                continue
         ch = command[i]
         if not q and ch == "<" and command.startswith("<<", i) and not command.startswith("<<<", i):
             m = _HEREDOC_START.match(command, i)
@@ -972,9 +1100,9 @@ def _split_unquoted(command: str, *, pipes: bool = False, newlines: bool = False
         i += 1
     if q:
         alt = "|".join(re.escape(x) for x in seps)
-        return [x.strip() for x in re.split(rf"\s*(?:{alt})\s*", command)]
+        return tuple(x.strip() for x in re.split(rf"\s*(?:{alt})\s*", command))
     out.append("".join(cur).strip())
-    return out
+    return tuple(out)
 
 
 def _unquoted_pipe(seg: str) -> int | None:
@@ -994,6 +1122,15 @@ def _unquoted_pipe(seg: str) -> int | None:
 def _line_count(path: str) -> int | None:
     if not _isfile(path):
         return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return _line_count_of(path, st.st_mtime_ns, st.st_size)
+
+
+@functools.lru_cache(maxsize=4096)
+def _line_count_of(path: str, _mtime: int, _size: int) -> int | None:
     try:
         with open(path, "rb") as fh:
             return sum(1 for _ in fh)
@@ -1039,13 +1176,21 @@ def _numbered_evidence(numbered: dict[int, str], segments: list[str], loud: list
                 if pairs:
                     res.append(obs(numbered[segs[0]], pairs))
         return res + touch
-    others = [x for x in loud if not re.match(r"(?:echo|printf)\b", x) and x not in {segments[k] for k in numbered}]
-    pairs = _numbered_lines(stdout)
-    if others or not pairs:
+    plain_echo = re.compile(r"(?:echo|printf)\b(?!.*(?:\$\(|`))")  # `echo $(nl f)` prints anything
+    others = [x for x in loud if not plain_echo.match(x) and x not in {segments[k] for k in numbered}]
+    if any(_ANY_SHAPE.search(x) for x in others):
+        return touch  # another command may print numbered lines of its own
+    # With other commands in the same stdout (a grep, a jq, a wc), only lines in the exact
+    # `nl` shape are numbered evidence; the commands run in order, so the runs stay in order.
+    pairs = _numbered_lines(stdout, exact=bool(others))
+    if not pairs:
         return touch
     if len(set(numbered.values())) == 1:
         # Several slices of ONE file: every numbered line is that file's, wherever the runs break.
         return [obs(next(iter(numbered.values())), pairs)] + touch
+    split = _split_by_ranges([(numbered[k], _slice_ranges(segments[k]), _line_count(numbered[k])) for k in sorted(numbered)], pairs)
+    if split is not None:
+        return [obs(p, prs) for p, prs in split if prs] + touch
     runs: list[list[tuple[int, str]]] = [[pairs[0]]]
     for prev, cur in zip(pairs, pairs[1:]):
         if cur[0] <= prev[0]:
@@ -1055,6 +1200,65 @@ def _numbered_evidence(numbered: dict[int, str], segments: list[str], loud: list
     if len(runs) != len(order):
         return touch  # a range that continues past the previous one hides a boundary
     return [obs(p, r) for p, r in zip(order, runs)] + touch
+
+
+def _slice_ranges(seg: str) -> list[tuple[int, float]] | None:
+    """The line ranges ``nl -ba F | sed -n 'A,Bp;C,Dp'`` / ``cat -n F | head -N`` can print, in
+    file order; None when a filter (grep, tail) makes them unknown."""
+    parts = [x.strip() for x in _split_unquoted(seg, pipes=True)][1:]
+    ranges: list[tuple[int, float]] = [(1, float("inf"))]
+    for k, part in enumerate(parts):
+        m = re.fullmatch(r"sed\s+-n\s+['\"]?(\d+(?:,\d+)?p(?:;\d+(?:,\d+)?p)*)['\"]?", part)
+        if m and k == 0:
+            ranges = []
+            for spec in m.group(1).split(";"):
+                a, _, b = spec.rstrip("p").partition(",")
+                ranges.append((int(a), float(b or a)))
+            continue
+        if re.fullmatch(r"head(?:\s+-n)?(?:\s+-?\d+)?", part):
+            continue  # a prefix of what came before: the output may just stop early
+        return None
+    ranges.sort()
+    merged: list[tuple[int, float]] = []
+    for a, b in ranges:
+        if merged and a <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return merged
+
+
+def _split_by_ranges(order: list[tuple[str, list[tuple[int, float]] | None, int | None]], pairs: list[tuple[int, str]]) -> list[tuple[str, list[tuple[int, str]]]] | None:
+    """Split numbered lines among slices printed one after another, using what each slice can
+    print: it starts at its first range, runs on line by line, and jumps only from the end of
+    one range to the start of the next. Any line that fits nowhere: None (no split)."""
+    out: list[tuple[str, list[tuple[int, str]]]] = []
+    i = 0
+    for path, ranges, length in order:
+        if ranges is None:
+            return None
+        if length is not None:
+            ranges = [(a, min(b, length)) for a, b in ranges if a <= length]
+        got: list[tuple[int, str]] = []
+        j = 0
+        while i < len(pairs) and ranges:
+            n = pairs[i][0]
+            if not got:
+                ok = n == ranges[0][0]
+            elif n == got[-1][0] + 1 and n <= ranges[j][1]:
+                ok = True
+            elif got[-1][0] == ranges[j][1] and j + 1 < len(ranges) and n == ranges[j + 1][0]:
+                j, ok = j + 1, True
+            else:
+                ok = False
+            if not ok:
+                break
+            got.append(pairs[i])
+            i += 1
+        if not got and ranges:
+            return None  # should have printed something: the lines went to the wrong slice
+        out.append((path, got))
+    return out if i == len(pairs) else None
 
 
 def _echo_chunks(segments: list[str], stdout: str) -> list[tuple[list[int], list[str]]] | None:
@@ -1520,6 +1724,248 @@ def _labelled_batch_evidence(code: str, text: str, cwd: str | None, at: str | No
     return res
 
 
+_JS_TOKEN = re.compile(r"\s*(?:(" + _JS_LIT + r")|(-?\d+(?:\.\d+)?|true|false|null|undefined)|(\[)|(\])|(,))", re.S)
+_JS_ARRAY_DECL = re.compile(r"\b(?:const|let|var)\s+(\w+)\s*=\s*\[")
+_JS_MAP = re.compile(
+    r"\b(\w+)\.map\(\s*(?:async\s*)?(?:\(\s*\[([^\]]*)\]\s*(?:,\s*\w+\s*)?\)|\(\s*(\w+)\s*(?:,\s*\w+\s*)?\)|(\w+))\s*=>"
+)
+# A JS string literal, including templates with simple ``${...}`` substitutions.
+_JS_STR = r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|`(?:[^`\\$]|\\.|\$(?!\{)|\$\{[^{}`]*\})*`"
+_JS_CALL_TPL = re.compile(r"tools\.exec_command\(\s*\{(?P<obj>(?:[^{}`\"']|" + _JS_STR + r")*)\}\s*\)", re.S)
+_JS_ARG = re.compile(r"\s*(?:(?:\"(\w+)\"|'(\w+)'|(\w+))\s*:\s*(" + _JS_STR + r"|-?\d+(?:\.\d+)?|[A-Za-z_][\w.]*)|(\w+))\s*,?", re.S)
+_JS_SUB = re.compile(r"\$\{\s*(?:JSON\.stringify\(\s*(\w+)\s*\)|(\w+))\s*\}")
+_SHELL_SAFE = re.compile(r"[^'\"`$\\\n]*")
+
+
+def _js_array(code: str, i: int) -> list[Any] | None:
+    """The JS array literal opening at ``code[i]``: strings decoded, other literals None, nested
+    arrays as lists. None when an element is computed."""
+    stack: list[list[Any]] = [[]]
+    pos = i + 1
+    while True:
+        m = _JS_TOKEN.match(code, pos)
+        if not m:
+            return None
+        pos = m.end()
+        lit, other, opn, cls, _comma = m.groups()
+        if lit is not None:
+            stack[-1].append(_js_string(lit))
+        elif other is not None:
+            stack[-1].append(None)
+        elif opn:
+            stack[-1].append([])
+            stack.append(stack[-1][-1])
+        elif cls:
+            done = stack.pop()
+            if not stack:
+                return done
+
+
+def _js_call_args(code: str, start: int) -> dict[str, str] | None:
+    """The argument object of the first ``tools.exec_command({...})`` at or after ``start``, as raw
+    JS source per key (``cmd`` shorthand becomes ``cmd: cmd``)."""
+    m = _JS_CALL_TPL.search(code, start)
+    if not m or m.start() - start > 800:
+        return None
+    obj, pos, args = m.group("obj"), 0, {}
+    while pos < len(obj.rstrip()):
+        pm = _JS_ARG.match(obj, pos)
+        if not pm or pm.end() == pos:
+            return None
+        if pm.group(5):
+            args[pm.group(5)] = pm.group(5)
+        else:
+            args[pm.group(1) or pm.group(2) or pm.group(3)] = pm.group(4)
+        pos = pm.end()
+    return args
+
+
+def _cell_commands(code: str) -> list[dict[str, Any]] | None:
+    """The commands a multi-command Codex cell ran, in order: ``{"cmd", "labels", "workdir"}``.
+    From a list mapped over (``cmds.map(([name, cmd]) => tools.exec_command({cmd}))``, or a
+    ``${path}`` template), or from literal calls written out one by one. None if unknown."""
+    consts = {m.group(1): _js_string(m.group(2)) for m in _JS_CONST.finditer(code)}
+    arrays = {}
+    for m in _JS_ARRAY_DECL.finditer(code):
+        arr = _js_array(code, m.end() - 1)
+        if arr:
+            arrays[m.group(1)] = arr
+
+    def value(src: str | None, env: dict[str, Any]) -> str | None:
+        if src is None:
+            return None
+        if src[0] in "\"'":
+            return _js_string(src)
+        if src[0] == "`":
+            body = src[1:-1]
+
+            def sub(sm: re.Match[str]) -> str:
+                v = env.get(sm.group(1) or sm.group(2))
+                if not isinstance(v, str) or not _SHELL_SAFE.fullmatch(v):
+                    raise KeyError
+                return f'"{v}"' if sm.group(1) else v
+
+            try:
+                body = _JS_SUB.sub(sub, body)
+            except KeyError:
+                return None
+            return None if "${" in body else _js_string("`" + body + "`")
+        if src in env:
+            v = env[src]
+            return v if isinstance(v, str) else None
+        return consts.get(src)
+
+    for m in _JS_MAP.finditer(code):
+        items = arrays.get(m.group(1))
+        args = _js_call_args(code, m.end())
+        if not items or args is None or "cmd" not in args:
+            continue
+        names = [x.strip() for x in m.group(2).split(",")] if m.group(2) is not None else [m.group(3) or m.group(4)]
+        out = []
+        for item in items:
+            if m.group(2) is not None:
+                if not isinstance(item, list):
+                    return None
+                env = {n: v for n, v in zip(names, item) if n}
+                labels = [v for v in item if isinstance(v, str)]
+            else:
+                env = {names[0]: item}
+                labels = [item] if isinstance(item, str) else []
+            cmd = value(args["cmd"], env)
+            if cmd is None:
+                return None
+            out.append({"cmd": cmd, "labels": labels, "workdir": value(args.get("workdir"), env)})
+        return out
+    literal = codex_batch_commands(code)
+    if len(literal) >= 2:
+        return [{"cmd": a["cmd"], "labels": [a["cmd"]], "workdir": a.get("workdir") if isinstance(a.get("workdir"), str) else None} for a in literal]
+    return None
+
+
+def _json_results(text: str) -> list[dict[str, Any]] | None:
+    """Results printed as JSON (``text(r.value)``, ``JSON.stringify({cmd, output})``)."""
+    dec, pos, vals = json.JSONDecoder(), 0, []
+    s = text.strip()
+    while pos < len(s):
+        while pos < len(s) and s[pos] in " \t\r\n,":
+            pos += 1
+        if pos >= len(s):
+            break
+        try:
+            v, pos = dec.raw_decode(s, pos)
+        except ValueError:
+            return None
+        vals.extend(v if isinstance(v, list) else [v])
+    out = []
+    for v in vals:
+        if isinstance(v, dict) and v.get("status") == "fulfilled" and isinstance(v.get("value"), dict):
+            v = v["value"]
+        if not isinstance(v, dict) or not isinstance(v.get("output"), str):
+            return None
+        out.append(v)
+    return out or None
+
+
+def _header_chunks(items: list[dict[str, Any]], text: str, code: str = "") -> list[str] | None:
+    """Split output printed as ``<prefix><label><suffix>`` header lines, one per command, in order.
+    The header shape is learned from the output: it must match exactly one whole line per
+    command, and frame the label with something (a bare label line could be file content)."""
+    lines = text.split("\n")
+    where: dict[str, list[int]] = {}
+    for i, x in enumerate(lines):
+        where.setdefault(x, []).append(i)
+    width = min((len(it["labels"]) for it in items), default=0)
+    candidates = [[it["labels"][j] for it in items] for j in range(width)]
+    if re.search(r"`[^`]*\$\{\s*\w+\s*\+\s*1\s*\}", code):
+        candidates.append([str(i + 1) for i in range(len(items))])  # `--- ${i + 1} ---`
+    if re.search(r"`[^`]*\$\{\s*(?:i|idx|index|k|n|j)\s*\}", code):
+        candidates.append([str(i) for i in range(len(items))])
+    for labels in candidates:
+        if len(set(labels)) != len(labels):
+            continue
+        first = labels[0]
+        shapes = dict.fromkeys((x[: x.index(first)], x[x.index(first) + len(first) :]) for x in where if first in x)
+        for pre, suf in list(shapes)[:200]:
+            if not (pre + suf).strip() or (pre[-1:].isalnum() and first[:1].isalnum()) or (suf[:1].isalnum() and first[-1:].isalnum()):
+                continue  # a frame is needed, and the label must stand on its own ("17" is not "1")
+            pos, bounds = 0, []
+            for lab in labels:
+                hits = where.get(pre + lab + suf, [])
+                if len(hits) != 1 or hits[0] < pos:
+                    break
+                bounds.append(hits[0])
+                pos = hits[0] + 1
+            else:
+                return ["\n".join(lines[a + 1 : b]) for a, b in zip(bounds, [*bounds[1:], len(lines)])]
+    return None
+
+
+_JS_PRINT_OUTPUT = re.compile(
+    r"text\(\s*(\w+)(?:\.status\s*===?\s*[\"']fulfilled[\"']\s*\?\s*\1\.value)?\.output\s*(?::[^)]*)?\)"
+)
+
+
+def _concatenated_evidence(code: str, items: list[dict[str, Any]], text: str, cwd: str | None, at: str | None) -> list[Observation] | None:
+    """A cell that prints each output and nothing else, in the order the commands were listed:
+    its output is what ``cmd1; cmd2; ...`` would have printed, so read it as that command."""
+    prints = _JS_PRINT_OUTPUT.findall(code)
+    if len(prints) != 1 or code.count("text(") != 1:
+        return None
+    dirs = {it["workdir"] for it in items}
+    if len(dirs) != 1:
+        return None
+    wd = next(iter(dirs))
+    ecwd = os.path.join(cwd, wd) if wd and cwd and not os.path.isabs(wd) else (wd or cwd)
+    cmds = [expand_assignments(it["cmd"]) for it in items]
+    if any(re.match(r"\s*cd\b", c) for c in cmds):
+        return None  # each call starts in the same directory; a joined command would not
+    return [o for o in from_shell("\n".join(cmds), text, ecwd, at) if o.line_numbers or o.tool != "Bash"]
+
+
+def _cell_batch_evidence(code: str, text: str, cwd: str | None, at: str | None, cut: bool) -> list[Observation] | None:
+    """Evidence from a cell that ran several commands and printed each output whole, either as
+    JSON results or under a header line per command. Lines that carry their own numbers always
+    count; a plain slice (``sed -n 'A,Bp' f``) only when the output is known to be exactly the
+    command's (JSON, or a header template that prints nothing after the output) and uncut."""
+    items = _cell_commands(code)
+    if not items:
+        return None
+    chunks: list[str | None]
+    exact = False
+    results = _json_results(text)
+    if results is not None:
+        exact = True
+        if all(isinstance(r.get("cmd"), str) for r in results):
+            by_cmd = {r["cmd"]: r for r in results}
+            picked = [by_cmd.get(it["cmd"]) for it in items]
+        elif len(results) == len(items):
+            picked = list(results)
+        else:
+            return None
+        chunks = [None if r is None or r.get("exit_code") else r["output"] for r in picked]
+    else:
+        found = _header_chunks(items, text, code)
+        if found is None:
+            return _concatenated_evidence(code, items, text, cwd, at)
+        chunks = list(found)
+        exact = bool(re.search(r"text\(\s*`[^`]*\\n\$\{[\w.\[\]]+\.output\}`\s*\)", code))
+    res: list[Observation] = []
+    for it, chunk in zip(items, chunks):
+        if chunk is None:
+            continue
+        chunk_cut, chunk = _codex_uncut(chunk.lstrip("\n"))  # each output may carry its own cut banner
+        chunk = chunk.rstrip("\n") + "\n"
+        if chunk_cut:
+            exact = False
+        wd = it["workdir"]
+        ecwd = os.path.join(cwd, wd) if wd and cwd and not os.path.isabs(wd) else (wd or cwd)
+        cmd = expand_assignments(it["cmd"])
+        for o in from_shell(_CD.sub("", cmd, count=1), chunk, effective_cwd(cmd, ecwd), at):
+            if o.line_numbers or (exact and not cut and o.lines and o.tool == "Bash"):
+                res.append(o)
+    return res
+
+
 def _codex_text(out: Any) -> str:
     """Codex splits one output into parts ("...Output:\\n", then the stdout): concatenate them as
     they are. Joining with newlines would insert a line and shift every line number by one."""
@@ -1586,8 +2032,11 @@ def _read_codex_stream(
                 continue
             if cell is None:
                 if "tools.exec_command" in code:
-                    _cut, uncut = _codex_uncut(stdout)
-                    for o in _batch_grep_evidence(code, uncut, cwd, at) + _labelled_batch_evidence(code, uncut, cwd, at):
+                    cut, uncut = _codex_uncut(stdout)
+                    batch = _cell_batch_evidence(code, uncut, cwd, at, cut)
+                    if batch is None:
+                        batch = _labelled_batch_evidence(code, uncut, cwd, at)
+                    for o in _batch_grep_evidence(code, uncut, cwd, at) + batch:
                         sess.add(o)
                 continue
             args, form = cell

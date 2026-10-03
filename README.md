@@ -13,7 +13,7 @@ Python 3.11+ · Zero runtime dependencies · MIT · Local only · Early release
 
 ```console
 python3 -m venv .venv && . .venv/bin/activate
-python3 -m pip install 'git+https://github.com/jonah-ux/sourcemark.git@v0.4.0'
+python3 -m pip install 'git+https://github.com/jonah-ux/sourcemark.git@v0.5.0'
 sourcemark --version
 python3 demos/demo.py        # 30-second synthetic walkthrough (from a checkout)
 ```
@@ -33,7 +33,7 @@ That command creates and removes its own temporary git repository, prints each s
 non-zero if the moved/edited citation or the deliberate checker refusals do not appear.
 
 Each [release](https://github.com/jonah-ux/sourcemark/releases) also ships a wheel, an sdist and
-`SHA256SUMS`; `pip install sourcemark-0.4.0-py3-none-any.whl` after checking the hash. Python 3.11+,
+`SHA256SUMS`; `pip install sourcemark-0.5.0-py3-none-any.whl` after checking the hash. Python 3.11+,
 no dependencies.
 
 ## Usage
@@ -110,7 +110,7 @@ Evaluated against real source files, real git history and real agent sessions. S
 - **Anchors through real git history:** 4,691 marks replayed through real commits of four repositories (edits, insertions, renames, deletions), checked against a line alignment of the two versions. **99.5%** correct on status and line; 100% of lines that did not change are found. Median **0.6 ms** per resolve.
 - **Anchors under synthetic mutation:** about 1,550 cases per seed on 30 real files (insertions, deletions, in-place edits, reindents, git renames, untracked moves, cut/paste, decoy duplicates). **97.3%** (seed 1) and **97.4%** (held-out seed 2).
 - **Citation checks on Claude Code sessions:** about 2,900 sessions, with near-miss citations injected next to real evidence (a neighbouring unread line, a range running one line past what was read, a changed word in a quote, an unread file with the same name, a mutated URL). **0.00%** of good citations flagged and **99.9%** of the bad ones caught. On the real citations an independent oracle can judge, the two agree **92%** of the time. Most disagreements are citations the checker credits from evidence the simpler oracle cannot see. The rest are lines seen through commands the checker does not model, such as awk renumbering or a sed that rewrites paths.
-- **Citation checks on Codex rollouts:** about 3,000 rollouts, 47,000 real citations and 8,300 injected near-misses. **0.00%** of good citations flagged, every near-miss kind caught, median **26 ms** per session.
+- **Citation checks on Codex rollouts:** about 3,000 rollouts, 47,000 real citations and 8,300 injected near-misses. **0.00%** of good citations flagged, every near-miss kind caught, median **26 ms** per session. Cells that run several commands (command lists, `Promise.all`, loops) are read command by command; on 600 recent rollouts the checker agrees with an independent oracle on **78%** of real line citations, up from 73%.
 - **Database values:** 40 citations across 4 live production tables, re-resolved against an independent raw read: **100%** agreement.
 - **Adversarial review:** three independent reviewers attacked the checker, the resolver, redaction and the ledger. Every reproduced finding is now a regression test, as is every failure found by the benchmarks.
 
