@@ -1119,6 +1119,45 @@ class GlobRootGrepTest(unittest.TestCase):
         self.assertEqual([o for o in from_shell(f"grep -rn x {d}/*/lib/hooks.py", out, d) if o.line_numbers], [])
 
 
+class MidCommandCdTest(unittest.TestCase):
+    """From a real session: `cd "$W"; git switch ...; cd apps/web/src; echo ===; grep -rn ...`."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="sm-cd-")
+        self.addCleanup(shutil.rmtree, self.d, True)
+        for rel in ("apps/web/src/app/Ads.tsx", "app/Ads.tsx"):
+            os.makedirs(os.path.dirname(os.path.join(self.d, rel)), exist_ok=True)
+            with open(os.path.join(self.d, rel), "w") as fh:
+                fh.write("x\n" * 700)
+
+    def nums(self, obs):
+        return {(os.path.relpath(o.path, self.d), n) for o in obs for n in (o.line_numbers or [])}
+
+    def test_relative_hits_resolve_against_the_directory_cd_moved_to(self):
+        cmd = f'cd {self.d}\ngit switch -q b && echo on\ncd apps/web/src\necho "=== sites ==="\ngrep -rn "acqHref(" app | head -20'
+        out = "on\n=== sites ===\napp/Ads.tsx:659:  href={acqHref(x)}\n"
+        self.assertEqual(self.nums(from_shell(cmd, out, "/elsewhere")), {("apps/web/src/app/Ads.tsx", 659)})
+
+    def test_cd_to_an_unknown_or_conditional_place_keeps_file_level_only(self):
+        out = "app/Ads.tsx:659:x\n"
+        for cmd in (
+            'cd apps/web/src && cd "$SUB" && grep -rn x app',
+            "cd - && grep -rn x app",
+            "(cd apps/web/src && true); grep -rn x app",
+            "for d in apps; do cd $d; done; grep -rn x app",
+            "pushd apps/web/src; grep -rn x app",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.nums(from_shell(cmd, out, self.d)), set())
+
+    def test_segments_before_the_cd_keep_the_old_directory(self):
+        cmd = 'grep -n x app/Ads.tsx; cd apps/web/src; echo "=== b ==="; grep -n y app/Ads.tsx'
+        out = "3:x\n=== b ===\n9:y\n"
+        got = self.nums(from_shell(cmd, out, self.d))
+        self.assertNotIn(("app/Ads.tsx", 9), got)
+        self.assertNotIn(("apps/web/src/app/Ads.tsx", 3), got)
+
+
 class SelfNumberedAndBatchTest(unittest.TestCase):
     """From real Codex rollouts: `nl -ba F | sed -n 'A,Bp'` and multi-command cells."""
 
@@ -1208,6 +1247,21 @@ class QuoteShorthandTest(unittest.TestCase):
     def test_a_wrong_name_or_wrong_text_is_still_caught(self):
         self.assertEqual(self.v("the gate is `gate4_errors()` (wired at `v.py:1522`)"), "quote_mismatch")
         self.assertEqual(self.v("`S.md:5` — `Current source gate: **Gate 3**` is stale"), "quote_mismatch")
+
+
+class CodeSpanPairingTest(unittest.TestCase):
+    """From a real session: a 205-char backticked path made the quote after it vanish."""
+
+    def test_a_quote_after_a_long_or_short_code_span_is_still_attached(self):
+        long_path = "/Users/j/Library/Application Support/" + "x" * 170 + "/plan.md"
+        cs = extract(f"`{long_path}:37` has `- versioned directories plus an atomicX link switch`.")
+        self.assertEqual(cs[0].claimed_quotes, ["- versioned directories plus an atomicX link switch"])
+        cs = extract("`x` is set at `a.py:3` to `retry_limit = 5`.")
+        self.assertEqual([c.claimed_quotes for c in cs], [["retry_limit = 5"]])
+
+    def test_prose_between_two_spans_is_never_a_quote(self):
+        cs = extract("`a.py:3` and `b` both have it")
+        self.assertEqual(cs[0].claimed_quotes, [])
 
 
 class MisquotedNameTest(unittest.TestCase):
