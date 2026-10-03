@@ -39,7 +39,6 @@ _CODEISH = re.compile(r"\s|[()=\[\]{}<>;,'\"+*]|->|=>")
 # A bare identifier is still checked, softly: it must appear SOMEWHERE in what was read of the
 # file. A name that occurs nowhere in the file as read was not taken from it.
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
-_ONE_TOKEN = re.compile(r"[^\s]+[:,;]")  # `key:` / `NAME,`: one token with trailing punctuation
 
 
 def _near_miss(tok: str, text: str) -> str | None:
@@ -248,13 +247,10 @@ def _quotes_missing(c: Citation, obs: list, out: CitationCheck) -> bool:
     hay = squash("\n".join(window))
     read_all: str | None = None
     for q in c.claimed_quotes:
-        if not _CODEISH.search(q) or _ONE_TOKEN.fullmatch(q.strip()):
-            tok = q.strip().strip("'\"").rstrip(":,;")
+        if not _CODEISH.search(q):
+            tok = q.strip().strip("'\"").rstrip(":")
             if not _soft_checkable(tok):
-                if _CODEISH.search(q):
-                    pass  # an expression after all: checked strictly below
-                else:
-                    continue
+                continue
             else:
                 if read_all is None:
                     texts = [t for o in obs for t in (o.lines or [])]
