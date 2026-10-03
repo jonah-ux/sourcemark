@@ -1557,6 +1557,33 @@ class CodexMemoryCitationTest(unittest.TestCase):
             self.assertEqual((r.verdict, r.resolved_path), ("verified", "/u/notes/memory/pool.md"))
 
 
+class MisquoteOnCitedLineTest(unittest.TestCase):
+    """From the hard bench: one character changed in a quoted path, URL or decorator passed,
+    because only bare names were soft-checked."""
+
+    def setUp(self):
+        self.s = Session(cwd="/r")
+        self.s.add(Observation("/r/.gitignore", 10, ["!COMMAND-STATUS.md", "!apps/senate-dashboard/api/", "!data/.gitkeep"], "Read", None))
+        self.s.add(Observation("/r/t.py", 45, ["class T:", "    @classmethod", "    def make(cls):",
+                                               "        closedDate = row.get('closedate')"], "Read", None))
+
+    def v(self, text):
+        return check_text(text, self.s).checks[0].verdict
+
+    def test_a_character_changed_on_the_cited_line_is_a_misquote(self):
+        for text in (".gitignore:10 has `!COMMAND-STATUSX.md`", ".gitignore:11 has `!apps/senate-dashboardX/api/`",
+                     ".gitignore:12 has `!dataX/.gitkeep`", "t.py:46 has `@classmethodX`"):
+            self.assertEqual(self.v(text), "quote_mismatch", text)
+
+    def test_exact_text_and_real_names_pass(self):
+        for text in (".gitignore:10 has `!COMMAND-STATUS.md`", "t.py:46 has `@classmethod`",
+                     # A name the file has elsewhere is a real name, not a misquote of `closedDate`.
+                     "t.py:48 prefers `closedate`",
+                     # A plural or separator variant is prose.
+                     ".gitignore:11 keeps `apps/senate-dashboards`"):
+            self.assertEqual(self.v(text), "verified", text)
+
+
 class MisquotedNameTest(unittest.TestCase):
     """A bare name is a mention, not a quote, unless it misquotes a name that WAS read."""
 
