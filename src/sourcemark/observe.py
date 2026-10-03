@@ -474,9 +474,15 @@ def _grep_targets(args: list[str], cwd: str | None, tool: str = "grep") -> list[
     return out or None
 
 
+def _flag_letters(a: str) -> str:
+    """The option letters of a short-option cluster: ``-nA5`` is -n plus -A 5. "" for anything else."""
+    m = re.fullmatch(r"-([A-Za-z]+)\d*", a)
+    return m.group(1) if m else ""
+
+
 def _single_target(args: list[str], cwd: str | None, tool: str = "grep") -> str | None:
     """The one regular file a grep/rg invocation searched, if it searched exactly one."""
-    if any(a in ("-r", "-R", "--recursive") or (a.startswith("-") and not a.startswith("--") and "r" in a[1:] and a[1:].isalpha()) for a in args):
+    if any(a in ("-r", "-R", "--recursive") or "r" in _flag_letters(a) for a in args):
         return None
     via_e, operands = _grep_operands(args, tool)
     files = operands if via_e else operands[1:]  # without -e, the first operand is the pattern
@@ -509,10 +515,10 @@ def _vanished_grep_file(operand: str, p: str, args: list[str], tool: str) -> boo
 
 def _numbered(args: list[str]) -> bool:
     """grep/rg print line numbers only when asked (rg numbers by default only on a terminal)."""
-    if "--no-line-number" in args or any(a.startswith("-") and not a.startswith("--") and "N" in a[1:] and a[1:].isalpha() for a in args):
+    if "--no-line-number" in args or any("N" in _flag_letters(a) for a in args):
         return False
     return "--line-number" in args or "--vimgrep" in args or any(
-        a.startswith("-") and not a.startswith("--") and a[1:].isalpha() and "n" in a[1:] for a in args
+        "n" in _flag_letters(a) for a in args
     )
 
 
