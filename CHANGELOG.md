@@ -251,7 +251,7 @@ Two independent adversarial reviews and a loop over 120 real agent sessions foun
 - **CLI**:
   - usage errors exit 2
   - `hook stop` honours `--ledger`
-  - `python -m sourcemark` works
+  - `python3 -m sourcemark` works
 
 A third review found and fixed:
 

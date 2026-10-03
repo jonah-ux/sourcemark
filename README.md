@@ -58,7 +58,7 @@ gh attestation verify sourcemark-*.whl --repo jonah-ux/sourcemark
 Run the owner-native supply-chain and privacy audit from a clean checkout:
 
 ```console
-python scripts/audit_public_surface.py --json
+python3 scripts/audit_public_surface.py --json
 ```
 
 The static receipt checks dependency and license declarations, release-workflow provenance markers,
