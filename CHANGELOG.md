@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+Learned from the real Claude Code citations the independent oracle saw but the checker flagged `unread_lines`: 55 open cases are down to 26. Every fix has a regression test built from the real failing shape.
+
+Measured against v0.3.1 on the newest real sessions:
+
+- **Codex:** 108 false `quote_mismatch` flags removed across 15,866 citations.
+- **Claude Code:** 0 newly failing verdicts across 1,086 citations.
+- **Hard bench, 600 Claude Code sessions:** recall 99.77% → 99.89%, changed-word quotes caught 99.66% → 100%, agreement with the oracle 91.61% → 92.45%, 0 false flags.
+- **Codex hard bench:** 0 false flags, recall unchanged.
+- **Resolver history:** no changes.
+
+One citation became newly failing: a runtime value written next to a citation ("leaving `serving_pid=0`") is now taken as a quote of the cited line. v0.3.1 avoided that only because its broken backtick pairing dropped the quote.
+
+- **`git show REV:F` and `cat F` count as file sources.** `git show origin/main:F | grep -n`, `| sed -n 'A,Bp'` and `| head` now give line evidence for `F`. `REV:F` resolves from the top of the work tree, `REV:./F` from the current directory. Hundreds of these pipelines appear in recent sessions.
+- **`cd` part-way through a command is followed.** A plain `cd DIR` segment moves later relative paths. A `cd` to somewhere unknown (`cd "$d"`, `cd -`, inside a subshell, loop or `if`, `pushd`) still drops the command to file-level evidence.
+- **A one-file `grep` keeps its hits after the file is gone** (a removed worktree, a deleted temp file). Only plain `grep` on one non-glob operand is trusted: it never descends into a directory without `-r`.
+- **Option clusters with a value:** `-n` is recognised in `git grep -nA5` and `grep -rnC2`. Before, the output of these greps was ignored.
+- **Glob search roots:** hits of `grep -rn PAT ~/x/*/lib/f.py` are no longer dropped as out of scope.
+- **Code spans pair correctly.** A backticked span shorter than 4 or longer than 200 characters made the extractor pair the wrong backticks. It read the prose between two spans as code and lost the quote that followed, so a misquote after a long path went unchecked.
+- **Links written as code are not quotes.** Codex writes citations as `` `[a.py:24](/abs/a.py:24)` ``. Each such span was taken as a quote for the citation next to it, so correct citations were flagged `quote_mismatch`.
+- **Shorthand quotes:** `` `fn()` `` naming a function, and `` `Line: **Gate 2**` `` bolding a prefix of the line, are no longer flagged `quote_mismatch`.
+
 ## 0.3.1 — 2026-10-02
 
 - **Misquoted names are caught (#69, #70).** A quote that is a single name is flagged only when it occurs nowhere in what was read of the file and a near-identical name was read (`forbidden_patternsX` for `forbidden_patterns`). Plural, separator and case variants, file names and paths, and text known only by line number are never flagged. 0 verdict changes over 17,759 real citations.
