@@ -23,6 +23,10 @@
     command with a `||` fallback.
   - Google Docs/Drive `usp=` and YouTube `si=` share parameters no longer make a link a
     different page (`…/edit?usp=drivesdk` from the API, `…/edit` in the answer).
+- A quoted path, URL, decorator or dotted name that misquotes the cited line by a character or
+  two (`!MASTER-INDEXX.md`, `@classmethodX`, `p.settlement_revisionX`) is a `quote_mismatch`.
+  Before, only bare names were soft-checked and these passed. A name the file has elsewhere
+  is still a real name, not a misquote (`closedate` beside `closedDate`).
 
 ## 0.5.1 — 2026-10-03
 
