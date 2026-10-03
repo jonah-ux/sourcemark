@@ -173,6 +173,13 @@ def _attach_quotes(text: str, cites: list[Citation], window: int) -> None:
             continue
         if re.fullmatch(rf"{_PATH}(?::\d+(?:[-–]\d+)?)?", q.strip()) or any(q in c.raw for c in path_cites):
             continue  # the code span IS a citation, not a quote
+        inner = sorted((c for c in path_cites if m.start(1) <= c.start and c.end <= m.end(1)), key=lambda c: -c.start)
+        if inner:
+            rest = q
+            for c in inner:
+                rest = rest[: c.start - m.start(1)] + rest[c.end - m.start(1) :]
+            if not re.sub(r"[\s\[\]()]", "", rest):
+                continue  # `[a.py:3](/abs/a.py:3)`: a link written as code, still only a citation
         best: Citation | None = None
         best_d = window + 1
         for c in path_cites:
