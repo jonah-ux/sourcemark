@@ -395,6 +395,25 @@ _GH_REF = re.compile(r"\bgh\s+(?P<kind>pr|issue)\s+(?:view|merge|checks|diff|com
 _GH_REPO = re.compile(r"(?:-R|--repo)[=\s]+(?:https://github\.com/)?(?P<repo>[\w.\-]+/[\w.\-]+)")
 
 
+_FETCHER = re.compile(
+    r"\s*(?:[A-Za-z_]\w*=)?(?:\$\(\s*)?(?:(?:timeout|env)\s+\S+\s+)*(?:\S*/)?"
+    r"(?:curl|wget|yt-dlp|youtube-dl|xh|https?|lynx|w3m)\s"
+)
+
+
+def fetched_refs(command: str, stdout: str = "") -> set[str]:
+    """``curl https://x/a`` or ``yt-dlp https://x/v`` that ran and printed something fetched
+    those URLs, though the output need not repeat them. Not an ``echo``, and not with a fallback
+    (``|| true``, ``|| echo down``) that prints whatever happened."""
+    if not stdout.strip() or "||" in command:
+        return set()
+    urls: set[str] = set()
+    for seg in _split_unquoted(command, pipes=True, newlines=True):
+        if _FETCHER.match(seg):
+            urls |= urls_in(seg)
+    return urls
+
+
 def gh_refs(command: str, stdout: str = "") -> set[str]:
     """``gh pr view 12 --repo o/r`` that ran and printed something: the session looked at
     o/r#12. Not when the text is an argument (``echo "gh pr view 12 ..."``) or the failure is
@@ -1445,7 +1464,8 @@ def _read_claude_stream(
                         cmd = str(tin.get("command", ""))
                         got -= urls_in(cmd)  # `echo https://x` returns what the agent typed
                         out_text = tur.get("stdout") if isinstance(tur, dict) else _text_of(c.get("content"))
-                        sess.urls |= gh_refs(cmd, out_text if isinstance(out_text, str) else "")
+                        out_text = out_text if isinstance(out_text, str) else ""
+                        sess.urls |= gh_refs(cmd, out_text) | fetched_refs(cmd, out_text)
                     sess.urls |= got
                     if _is_web_tool(name):
                         sess.urls |= urls_in(tin)
@@ -2097,6 +2117,8 @@ def _read_codex_stream(
             wd = args.get("workdir") if isinstance(args.get("workdir"), str) else None
             ecwd = os.path.join(cwd, wd) if wd and cwd and not os.path.isabs(wd) else (wd or cwd)
             sess.urls |= gh_refs(cmd, stdout)
+            if not exit_code:
+                sess.urls |= fetched_refs(cmd, stdout)
             if exit_code:
                 # Failed: the printed lines cannot be trusted as the file. File-level only.
                 for o in from_shell_touches(cmd, effective_cwd(cmd, ecwd), set(), at):
@@ -2238,7 +2260,13 @@ def normalize_url(url: str) -> str:
     url = url.split("#", 1)[0]
     if "?" in url:
         base, q = url.split("?", 1)
-        keep = [kv for kv in q.split("&") if not kv.lower().startswith(("utm_", "fbclid=", "gclid="))]
+        drop = ("utm_", "fbclid=", "gclid=")
+        host = re.sub(r"^https?://(?:www\.)?", "", base, flags=re.I).split("/", 1)[0].lower()
+        if host in ("docs.google.com", "drive.google.com"):
+            drop += ("usp=",)  # how the link was shared (drivesdk, sharing), not which file
+        elif host in ("youtube.com", "youtu.be", "m.youtube.com", "music.youtube.com"):
+            drop += ("si=",)  # share-session id
+        keep = [kv for kv in q.split("&") if not kv.lower().startswith(drop)]
         url = base + ("?" + "&".join(keep) if keep else "")
     url = re.sub(r"^http://", "https://", url, flags=re.I)
     m = re.match(r"^(https://)([^/?]+)(.*)$", url, flags=re.I)
