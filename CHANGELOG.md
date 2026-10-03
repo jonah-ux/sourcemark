@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-10-02
 
 Learned from the real Codex citations the independent oracle saw but the checker flagged. Every fix has a regression test built from the real cell shape.
 
