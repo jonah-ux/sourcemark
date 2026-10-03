@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.1 — 2026-10-03
+## Unreleased — 0.5.1
 
 - Verify CI/release demos against the installed package with `--installed`, without the
   source-checkout import fallback.
