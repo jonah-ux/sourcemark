@@ -239,8 +239,101 @@ _PATHISH = re.compile(r"(?<![\w@:/])(?:~?/|\.{1,2}/)?(?:[\w.\-]+/)*[\w.\-]+\.[A-
 _ASSIGN = re.compile(r"(?:^|[;&|\n(]\s*)(?:export\s+)?(?P<name>[A-Za-z_]\w*)=(?P<val>\"[^\"$`]*\"|'[^']*'|[^\s;&|$`\"']+)(?=[\s;&|)]|$)")
 
 
+_FUNC_DEF = re.compile(r"(?:^|(?<=[;&\n]))[ \t]*(?:function[ \t]+)?(?P<name>[A-Za-z_][\w-]*)[ \t]*\(\)[ \t]*\{")
+
+
+def _brace_end(text: str, i: int) -> int | None:
+    """Index just past the ``}`` closing the ``{`` at ``i - 1``, skipping quoted text."""
+    depth, q = 1, None
+    while i < len(text):
+        ch = text[i]
+        if q:
+            if ch == "\\" and q == '"':
+                i += 1
+            elif ch == q:
+                q = None
+        elif ch in "'\"":
+            q = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def _positional(body: str, args: list[str]) -> str | None:
+    """``body`` with ``$1``.., ``${1}``, ``$@``/``$*`` and ``${1%%,*}``-style trims filled in."""
+    def arg(n: str) -> str:
+        k = int(n)
+        return args[k - 1] if 0 < k <= len(args) else ""
+
+    def trim(m: re.Match[str]) -> str:
+        v, op, pat = arg(m.group(1)), m.group(2), m.group(3)
+        rx = "".join(".*" if c == "*" else "." if c == "?" else re.escape(c) for c in pat)
+        if op in ("%", "%%"):
+            hits = [i for i in range(len(v) + 1) if re.fullmatch(rx, v[i:])]
+            return v[: (min(hits) if op == "%%" else max(hits))] if hits else v
+        hits = [i for i in range(len(v) + 1) if re.fullmatch(rx, v[:i])]
+        return v[(max(hits) if op == "##" else min(hits)):] if hits else v
+
+    out = re.sub(r"\$\{([1-9])(%%|%|##|#)([^}]*)\}", trim, body)
+    if re.search(r"\$\{[1-9][^}]", out):
+        return None  # another parameter expansion of an argument: not filled in here
+    joined = " ".join(shlex.quote(a) for a in args)
+    out = re.sub(r'"\$[@*]"|\$[@*]', lambda m: joined, out)
+    return re.sub(r"\$(?:\{([1-9])\}|([1-9]))", lambda m: arg(m.group(1) or m.group(2)), out)
+
+
+def inline_functions(command: str) -> str:
+    """Inline a shell function defined in the command (``p(){ echo "## $1"; sed -n "$2p" $1; }``)
+    at each call that is a command of its own (``p a.ts 10,20``), so what it read is attributed."""
+    if "()" not in command:
+        return command
+    funcs: dict[str, str] = {}
+    spans: list[tuple[int, int]] = []
+    for m in _FUNC_DEF.finditer(command):
+        end = _brace_end(command, m.end())
+        if end is None:
+            return command
+        body = command[m.end() : end - 1].strip().rstrip(";").strip()
+        if re.search(r"\b(?:shift|local|return)\b|\$#|\$0", body) or m.group("name") in funcs:
+            return command  # control flow over its own arguments: not a plain template
+        funcs[m.group("name")] = body
+        spans.append((m.start(), end))
+    if not funcs:
+        return command
+    # The definition becomes a no-op command, so `cd /w && p(){ ...; }; p a` stays `cd /w && true; ...`.
+    pieces, last = [], 0
+    for a, b in spans:
+        pieces += [command[last:a], " true" if a and command[a - 1] not in "\n" else "true"]
+        last = b
+    rest = "".join(pieces + [command[last:]])
+    done = [0]
+    names = "|".join(re.escape(n) for n in sorted(funcs, key=len, reverse=True))
+    call = re.compile(rf"(?:^|(?<=[;&\n]))(?P<lead>[ \t]*)(?P<name>{names})(?P<args>(?:[ \t]+[^;&|\n]*)?)(?=[;&\n]|$)")
+
+    def expand(m: re.Match[str]) -> str:
+        try:
+            args = shlex.split(m.group("args"))
+        except ValueError:
+            return m.group(0)
+        body = _positional(funcs[m.group("name")], args)
+        if body is None:
+            return m.group(0)
+        done[0] += 1
+        return m.group("lead") + body
+
+    out = call.sub(expand, rest)
+    return out if done[0] else command
+
+
 def expand_assignments(command: str) -> str:
-    """Substitute ``$NAME`` / ``${NAME}`` for plain ``NAME=value`` assignments made in the command."""
+    """Substitute ``$NAME`` / ``${NAME}`` for plain ``NAME=value`` assignments made in the command,
+    and inline shell functions the command defines and calls."""
+    command = inline_functions(command)
     vals: dict[str, str] = {}
     seen: dict[str, set[str]] = {}
     for m in _ASSIGN.finditer(command):
@@ -763,6 +856,28 @@ def _self_numbered(seg: str, cwd: str | None) -> str | None:
     if not argv:
         return None
     cmd, args = os.path.basename(argv[0]), argv[1:]
+    if len(parts) == 2 and cmd in ("sed", "head", "cat"):
+        # `sed -n 'A,Bp' F | nl -ba -vA`: numbering that starts where the slice starts prints
+        # the file's own line numbers.
+        try:
+            nargv = _drop_redirects(shlex.split(parts[1]))
+        except ValueError:
+            return None
+        if not nargv or os.path.basename(nargv[0]) != "nl":
+            return None
+        start = 1
+        for f in nargv[1:]:
+            v = re.fullmatch(r"-v(\d+)", f)
+            if v:
+                start = int(v.group(1))
+            elif not re.fullmatch(r"-b(?:a)?|-w6|-n(?:rn)?", f):
+                return None  # another width or numbering style: not the file's numbers as nl prints them
+        files = [a for a in args if not a.startswith("-") and not re.fullmatch(r"\d+(?:,\d+)?p|\d+", a)]
+        first = _slice_start([cmd, *[a for a in args if a not in files]]) if cmd != "cat" else (1 if not [a for a in args if a.startswith("-")] else None)
+        if first is None or first != start or len(files) != 1:
+            return None
+        path = os.path.expanduser(files[0])
+        return os.path.normpath(path if os.path.isabs(path) or not cwd else os.path.join(cwd, path))
     files = [a for a in args if not a.startswith("-")]
     if cmd == "nl":
         flags = [a for a in args if a.startswith("-")]
