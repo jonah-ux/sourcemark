@@ -7,7 +7,7 @@ from unittest import mock
 
 from sourcemark.check import check_text
 from sourcemark.cite import extract
-from sourcemark.observe import Observation, Session, from_shell, from_shell_writes, normalize_url, read_claude_transcript
+from sourcemark.observe import Observation, Session, expand_assignments, from_shell, from_shell_writes, normalize_url, read_claude_transcript
 
 LINES = [f"def handler_{i}(event):  # step {i} of the pipeline" for i in range(1, 41)]
 
@@ -1555,6 +1555,60 @@ class CodexMemoryCitationTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"CODEX_HOME": home}):
                 r = check_text(text, s).checks[0]
             self.assertEqual((r.verdict, r.resolved_path), ("verified", "/u/notes/memory/pool.md"))
+
+
+class ShellFunctionReadTest(unittest.TestCase):
+    """From a real subagent session: a helper function printed numbered slices of 14 files, and
+    every citation of them came out `unresolved`."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="sm-fn-")
+        self.addCleanup(shutil.rmtree, self.d, True)
+        for name in ("a.ts", "b.ts"):
+            with open(os.path.join(self.d, name), "w") as fh:
+                fh.write("".join(f"{name[0]} line {i}\n" for i in range(1, 41)))
+
+    @staticmethod
+    def nl(start, lines):
+        return "".join(f"{start + i:6d}\t{t}\n" for i, t in enumerate(lines))
+
+    def test_a_function_that_prints_numbered_slices_is_read(self):
+        cmd = expand_assignments('p(){ echo "##### $1 $2"; sed -n "$2p" $1 | nl -ba -v${2%%,*}; }; p a.ts 5,8; p b.ts 10,12')
+        out = ("##### a.ts 5,8\n" + self.nl(5, [f"a line {i}" for i in range(5, 9)])
+               + "##### b.ts 10,12\n" + self.nl(10, [f"b line {i}" for i in range(10, 13)]))
+        s = Session(cwd=self.d)
+        for o in from_shell(cmd, out, self.d):
+            s.add(o)
+        self.assertEqual(check_text("a.ts:6 has `a line 6`", s).checks[0].verdict, "verified")
+        self.assertEqual(check_text("b.ts:11 has `b line 11`", s).checks[0].verdict, "verified")
+        self.assertEqual(check_text("b.ts:20", s).checks[0].verdict, "unread_lines")
+
+    def test_inlining_leaves_other_commands_alone(self):
+        for cmd in ('q(){ portal-sql --json "$1"; }; q "select 1" | head',  # called inside a pipe
+                    "f(){ shift; cat $1; }; f a b"):  # moves its own arguments
+            self.assertEqual(expand_assignments(cmd), cmd)
+
+    def test_nl_numbering_counts_only_when_it_starts_where_the_slice_starts(self):
+        out = self.nl(5, [f"a line {i}" for i in range(5, 9)])
+        self.assertTrue(from_shell('sed -n "5,8p" a.ts | nl -ba -v5', out, self.d))
+        self.assertFalse([o for o in from_shell('sed -n "5,8p" a.ts | nl -ba', self.nl(1, ["x"] * 4), self.d) if o.line_numbers])
+
+
+class CitationListSpanTest(unittest.TestCase):
+    def test_a_span_of_citations_with_line_lists_is_not_a_quote(self):
+        s = Session(cwd="/r")
+        s.add(Observation("/r/b.ts", 140, ["x"] * 20, "Read", None))
+        self.assertEqual(check_text("Callers: `a.ts:282,411`, `b.ts:147`.", s).checks[1].verdict, "verified")
+
+    def test_a_template_placeholder_stands_for_the_one_in_the_file(self):
+        s = Session(cwd="/r")
+        s.add(Observation("/r/p.py", 988, ['    r = get(', "        f\"/crm/v6/Shop/{shop['zoho_account_id']}/Leads?page={page}\","], "Read", None))
+        self.assertEqual(check_text("`p.py:989` loops over `/crm/v6/Shop/{id}/Leads`", s).checks[0].verdict, "verified")
+        self.assertEqual(check_text("`p.py:989` loops over `/crm/v6/Deal/{id}/Leads`", s).checks[0].verdict, "quote_mismatch")
+        # Code in braces is code, and a near-miss of a brace expression is a misquote.
+        s.add(Observation("/r/g.py", 210, ["x", '    print(f"saved -> {dest.relative_to(ROOT)}")', '    url = f"/a/{shop_id}/b"'], "Read", None))
+        self.assertEqual(check_text('`g.py:211` has `print(f"saved -> {dest.relative_to(ROOTX)}")`', s).checks[0].verdict, "quote_mismatch")
+        self.assertEqual(check_text('`g.py:212` has `url = f"/a/{shop_idX}/b"`', s).checks[0].verdict, "quote_mismatch")
 
 
 class MisquoteOnCitedLineTest(unittest.TestCase):
