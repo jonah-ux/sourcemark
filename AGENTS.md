@@ -15,6 +15,6 @@ Instructions for AI agents using or modifying Sourcemark.
 ## Changing it
 
 - Python 3.11+, standard library only in `src/`.
-- Run `PYTHONPATH=src python -m unittest discover -s tests -v` before every commit.
+- Run `PYTHONPATH=src python3 -m unittest discover -s tests -v` before every commit.
 - Fixtures are synthetic. Never commit real paths, hostnames, transcripts, credentials, or database identifiers.
 - Accuracy changes need evidence: say which behaviour moved and by how much.
