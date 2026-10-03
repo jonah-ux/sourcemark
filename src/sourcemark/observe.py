@@ -10,6 +10,7 @@ even if the file changes later.
 
 from __future__ import annotations
 
+import fnmatch
 import functools
 import json
 import os
@@ -185,7 +186,12 @@ def from_grep_text(
         if not roots:
             return True
         rp = _realpath(p)
-        return any(rp == r or rp.startswith(r.rstrip(os.sep) + os.sep) for r in roots)
+        if any(rp == r or rp.startswith(r.rstrip(os.sep) + os.sep) for r in roots):
+            return True
+        # An unexpanded glob root (`~/x/*/lib/f.py`): the shell searched whatever it matched.
+        # Brackets stay literal: they are Next.js route segments (`[id]`) far more often than classes.
+        pats = [r.replace("[", "[[]").rstrip(os.sep) for r in roots if "*" in r or "?" in r]
+        return any(fnmatch.fnmatchcase(c, pat) or fnmatch.fnmatchcase(c, pat + os.sep + "*") for pat in pats for c in (rp, os.path.normpath(p)))
 
     match_paths: set[str] = set()
     for raw in lines:
@@ -468,9 +474,15 @@ def _grep_targets(args: list[str], cwd: str | None, tool: str = "grep") -> list[
     return out or None
 
 
+def _flag_letters(a: str) -> str:
+    """The option letters of a short-option cluster: ``-nA5`` is -n plus -A 5. "" for anything else."""
+    m = re.fullmatch(r"-([A-Za-z]+)\d*", a)
+    return m.group(1) if m else ""
+
+
 def _single_target(args: list[str], cwd: str | None, tool: str = "grep") -> str | None:
     """The one regular file a grep/rg invocation searched, if it searched exactly one."""
-    if any(a in ("-r", "-R", "--recursive") or (a.startswith("-") and not a.startswith("--") and "r" in a[1:] and a[1:].isalpha()) for a in args):
+    if any(a in ("-r", "-R", "--recursive") or "r" in _flag_letters(a) for a in args):
         return None
     via_e, operands = _grep_operands(args, tool)
     files = operands if via_e else operands[1:]  # without -e, the first operand is the pattern
@@ -478,15 +490,35 @@ def _single_target(args: list[str], cwd: str | None, tool: str = "grep") -> str 
         return None
     p = os.path.expanduser(files[0])
     p = os.path.normpath(p if os.path.isabs(p) or not cwd else os.path.join(cwd, p))
-    return p if _isfile(p) else None
+    if _isfile(p):
+        return p
+    return p if _vanished_grep_file(files[0], p, args, tool) else None
+
+
+def _vanished_grep_file(operand: str, p: str, args: list[str], tool: str) -> bool:
+    """A one-operand grep whose file is gone now (a removed worktree, a deleted temp file).
+
+    Plain grep never descends into a directory without -r or ``-d recurse``, so bare "N:text"
+    hits can only have come from that one file. rg recurses by default and globs could have
+    expanded to another file, so neither is trusted; nor is anything still present here.
+    """
+    if tool != "grep" or any(ch in operand for ch in "*?{"):
+        return False
+    parts = p.split(os.sep)
+    if not (os.path.isabs(p) and len(parts) > 3 and not _root_present(os.sep.join(parts[:3]))) and os.path.lexists(p):
+        return False  # still here, and not a regular file
+    if any(a in ("-d", "--directories=recurse", "--recursive") or a.startswith("--directories") for a in args):
+        return False
+    base = os.path.basename(p)
+    return "." in base.lstrip(".")  # a file name, not a directory name
 
 
 def _numbered(args: list[str]) -> bool:
     """grep/rg print line numbers only when asked (rg numbers by default only on a terminal)."""
-    if "--no-line-number" in args or any(a.startswith("-") and not a.startswith("--") and "N" in a[1:] and a[1:].isalpha() for a in args):
+    if "--no-line-number" in args or any("N" in _flag_letters(a) for a in args):
         return False
     return "--line-number" in args or "--vimgrep" in args or any(
-        a.startswith("-") and not a.startswith("--") and a[1:].isalpha() and "n" in a[1:] for a in args
+        "n" in _flag_letters(a) for a in args
     )
 
 
@@ -580,6 +612,82 @@ _LINE_FILTER = re.compile(
 _NUMBERED_LINE = re.compile(r"^\s*(\d+)\t(.*)$")
 
 
+def _git_top(d: str) -> str | None:
+    """The work tree holding ``d``, if it is still here."""
+    parts = d.split(os.sep)
+    if os.path.isabs(d) and len(parts) > 3 and not _root_present(os.sep.join(parts[:3])):
+        return None
+    while d and d != os.path.dirname(d):
+        if os.path.exists(os.path.join(d, ".git")):
+            return d
+        d = os.path.dirname(d)
+    return None
+
+
+def _git_show_file(argv: list[str], cwd: str | None) -> str | None:
+    """The file ``git [-C D] show REV:F`` prints whole, as an absolute path.
+
+    ``F`` is relative to the top of the work tree (``./F`` to the current directory). When the
+    work tree is gone the current directory stands in for its top: sessions run git there."""
+    if not argv or os.path.basename(argv[0]) != "git":
+        return None
+    i, base = 1, cwd
+    while i < len(argv) and argv[i] != "show":
+        if argv[i] == "-C" and i + 1 < len(argv):
+            d = os.path.expanduser(argv[i + 1])
+            base = d if os.path.isabs(d) or not base else os.path.join(base, d)
+            i += 2
+        elif argv[i] == "--no-pager":
+            i += 1
+        else:
+            return None
+    rest = argv[i + 1 :]
+    if len(rest) != 1 or rest[0].startswith("-") or ":" not in rest[0]:
+        return None
+    f = rest[0].split(":", 1)[1]
+    if not f or f.endswith("/"):
+        return None
+    if f.startswith(("./", "../")):
+        top = base
+    else:
+        top = (_git_top(base) if base else None) or base
+    if not top:
+        return None
+    return os.path.normpath(os.path.join(top, f))
+
+
+def _piped_source(stage: str, cwd: str | None) -> str | None:
+    """The one file a pipeline's first stage prints unchanged: ``cat F`` or ``git show REV:F``."""
+    try:
+        argv = _drop_redirects(shlex.split(stage))
+    except ValueError:
+        return None
+    if not argv:
+        return None
+    shown = _git_show_file(argv, cwd)
+    if shown:
+        return shown
+    if os.path.basename(argv[0]) == "cat" and len(argv) == 2 and not argv[1].startswith("-"):
+        f = os.path.expanduser(argv[1])
+        return os.path.normpath(f if os.path.isabs(f) or not cwd else os.path.join(cwd, f))
+    return None
+
+
+def _slice_start(argv: list[str]) -> int | None:
+    """Where the lines of ``sed -n 'A,Bp'`` / ``head [-n] N`` start in their input."""
+    if not argv:
+        return None
+    cmd, args = os.path.basename(argv[0]), argv[1:]
+    if cmd == "head":
+        ok = all(re.fullmatch(r"-\d+|-n\d*|\d+", a) for a in args)
+        return 1 if ok else None
+    if cmd == "sed":
+        scripts = [a for a in args if re.fullmatch(r"\d+(?:,\d+)?p", a)]
+        if args.count("-n") == 1 and len(scripts) == 1 and len(args) == 2:
+            return int(scripts[0].split(",")[0].rstrip("p"))
+    return None
+
+
 def _self_numbered(seg: str, cwd: str | None) -> str | None:
     """The file of ``nl -ba F | sed -n 'A,Bp'`` / ``cat -n F | head``: commands whose output lines
     carry their own line numbers, so where the slice starts does not matter."""
@@ -611,6 +719,38 @@ def _numbered_lines(text: str) -> list[tuple[int, str]]:
     return [(int(m.group(1)), m.group(2)) for m in map(_NUMBERED_LINE.match, text.split("\n")) if m]
 
 
+_CD_SEG = re.compile(r"""cd(?:\s+(?P<dir>'[^']*'|"[^"]*"|[^\s'"]+))?(?:\s+2>\s*/dev/null)?""")
+
+
+def _segment_cwds(segments: list[str], cwd: str | None) -> list[str | None] | None:
+    """The directory each segment runs in, following plain ``cd DIR`` segments.
+
+    None when a ``cd`` goes somewhere unknown (``cd "$d"``, ``cd -``) or only sometimes
+    (inside a subshell, a loop, an ``if``), or the directory stack moves."""
+    out: list[str | None] = []
+    cur = cwd
+    for seg in segments:
+        out.append(cur)
+        s = seg.strip()
+        if re.search(r"(?:^|[\s(;&|])(?:pushd|popd)\b", s):
+            return None
+        if not re.search(r"(?:^|[\s(;&|])cd\b", s):
+            continue
+        m = _CD_SEG.fullmatch(s)
+        if not m:
+            return None  # `(cd x && ...)`, `then cd x`, `do cd "$d"`: not followed
+        d = (m.group("dir") or "~").strip("'\"")
+        if d == "-" or re.search(r"[$`*?]", d):
+            return None
+        d = os.path.expanduser(d)
+        if not os.path.isabs(d):
+            if cur is None:
+                return None
+            d = os.path.join(cur, d)
+        cur = os.path.normpath(d)
+    return out
+
+
 def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None) -> list[Observation]:
     """Recognize simple file-printing commands whose stdout is a known file slice."""
     out: list[Observation] = []
@@ -618,8 +758,10 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
     segments = [_unwrap(x) for x in _split_unquoted(command, newlines=True)]
     loud = [x for x in segments if x and not _SILENT.match(x)]
     printers = [x for x in loud if (x.split() or [""])[0].rsplit("/", 1)[-1] in _PRINTERS]
-    if any(re.match(r"cd\b", x) for x in segments[1:]):
-        # The command changed directory part-way: the same relative name can mean two files.
+    cwds = _segment_cwds(segments, cwd)
+    if cwds is None:
+        # The command changed directory part-way to somewhere unknown: the same relative name
+        # can mean two files.
         return [o for o in _file_level_mentions(segments, cwd, at)]
     extra: list[Observation] = []  # grep evidence; other segments keep contributing
     fenced: list[tuple[list[int], list[str]]] | None | bool = False  # echo-marker chunks, lazily
@@ -633,18 +775,42 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
                 fenced = _echo_chunks(segments, stdout)
             for segs, chunk in fenced or []:
                 if segs == [k]:
-                    return _grep_evidence(gargv, "\n".join(chunk) + "\n", cwd, at, alone=True)
-        return _grep_evidence(gargv, stdout, cwd, at, alone=len(loud) == 1, other_printers=len(printers) > 1)
+                    return _grep_evidence(gargv, "\n".join(chunk) + "\n", cwds[k], at, alone=True)
+        return _grep_evidence(gargv, stdout, cwds[k], at, alone=len(loud) == 1, other_printers=len(printers) > 1)
 
     numbered: dict[int, str] = {}  # segment -> file, for self-numbered printers (nl -ba, cat -n)
     for k, seg in enumerate(segments):
-        nfile = _self_numbered(seg, cwd)
+        here = cwds[k]
+        nfile = _self_numbered(seg, here)
         if nfile is not None:
             numbered[k] = nfile
             continue
         pipe = _unquoted_pipe(seg)
         if pipe is not None:
             first = seg[:pipe].strip()
+            source = _piped_source(first, here)
+            if source is not None:
+                stages = [x.strip() for x in _split_unquoted(seg[pipe + 1 :], pipes=True)]
+                try:
+                    sargv = [_drop_redirects(shlex.split(x)) for x in stages]
+                except ValueError:
+                    continue
+                tool = os.path.basename(sargv[0][0]) if sargv and sargv[0] else ""
+                if tool == "grep":
+                    via_e, ops = _grep_operands(sargv[0][1:], tool)
+                    if not (ops if via_e else ops[1:]):  # reads the piped file, not files of its own
+                        grep = grep_for(k, [*sargv[0], source])
+                        if grep is not None:
+                            extra.extend(grep)
+                    continue
+                start = _slice_start(sargv[0])
+                if start is not None and all(_slice_start(a) == 1 for a in sargv[1:]):
+                    lines = stdout.split("\n")
+                    if lines and lines[-1] == "":
+                        lines = lines[:-1]
+                    out.append(Observation(source, start, lines, "Bash", at))
+                    owner[len(out) - 1] = k
+                continue
             if first.startswith(("rg ", "grep ", "git grep ")):
                 try:
                     fargv = _drop_redirects(shlex.split(first))
@@ -663,6 +829,9 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
         if not argv:
             continue
         cmd, args = os.path.basename(argv[0]), argv[1:]
+        shown = _git_show_file(argv, here)
+        if shown:
+            cmd, args = "cat", [shown]
         if cmd == "head" and "-n" in args:
             i = args.index("-n")
             args = args[:i] + args[i + 2 :]  # drop "-n N"
@@ -683,7 +852,7 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
         if cmd not in ("cat", "sed", "head", "tail", "nl") or len(files) != 1:
             continue
         path = os.path.expanduser(files[0])  # before the join: `~/x` is absolute, not relative
-        path = path if os.path.isabs(path) or not cwd else os.path.join(cwd, path)
+        path = path if os.path.isabs(path) or not here else os.path.join(here, path)
         lines = stdout.split("\n")
         if lines and lines[-1] == "":
             lines = lines[:-1]

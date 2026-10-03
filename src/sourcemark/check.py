@@ -265,7 +265,9 @@ def _quotes_missing(c: Citation, obs: list, out: CitationCheck) -> bool:
                 continue
         out.quotes_checked += 1
         # "foo(...)" / "a … b": the agent elided text; every remaining fragment must be present.
-        parts = [squash(p) for p in re.split(r"\.\.\.|…", q)]
+        # "foo()" names the function, not an empty call; "**Gate 2**" bolds a prefix of the line.
+        q = re.sub(r"(?<=\w)\(\)", "(...)", q)
+        parts = [squash(p) for p in re.split(r"\.\.\.|…|\*\*", q)]
         parts = [p for p in parts if len(p) >= 3]
         if parts and _in_order(hay, parts):
             out.quotes_found += 1

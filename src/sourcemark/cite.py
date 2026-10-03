@@ -47,7 +47,10 @@ def valid_url(url: str) -> bool:
 _TOKEN = re.compile(r"\[sm:(?P<tok>[a-z2-7]{6,26})\]")
 _MD_URL = re.compile(r"\[(?P<label>[^\]\n]{0,200})\]\((?P<url>https?://(?:[^()\s]|\([^()\s]*\))+)\)")
 _BARE_URL = re.compile(r"(?<![\w])https?://(?:[^\s()\]>`\"']|\([^\s()\]>`\"']*\))+")
-_CODE = re.compile(r"`([^`\n]{4,200})`")
+# Every inline code span, paired left to right. The length limits are applied afterwards:
+# a length-limited pattern re-syncs on the wrong backtick after a span it skips (a 1-char
+# `x`, a 300-char path) and reads the prose between two spans as code.
+_CODE = re.compile(r"`([^`\n]+)`")
 _FENCE = re.compile(r"^(```|~~~)[^\n]*\n.*?^\1[ \t]*$", re.S | re.M)
 _TLDS = {"com", "org", "net", "io", "dev", "ai", "co", "app", "edu", "gov", "us", "uk", "de", "info", "biz", "me", "xyz"}
 _SENTENCE_BREAK = re.compile(r"(?:[.!?](?:\s|$))|\n")
@@ -159,6 +162,8 @@ def _attach_quotes(text: str, cites: list[Citation], window: int) -> None:
         return
     for m in _CODE.finditer(text):
         q = m.group(1)
+        if not 4 <= len(q) <= 200:
+            continue
         owner = next(
             (c for c in path_cites if c.form == "markdown" and c.start < m.start() and m.end() <= c.start + c.raw.find("](")),
             None,
@@ -168,6 +173,13 @@ def _attach_quotes(text: str, cites: list[Citation], window: int) -> None:
             continue
         if re.fullmatch(rf"{_PATH}(?::\d+(?:[-–]\d+)?)?", q.strip()) or any(q in c.raw for c in path_cites):
             continue  # the code span IS a citation, not a quote
+        inner = sorted((c for c in path_cites if m.start(1) <= c.start and c.end <= m.end(1)), key=lambda c: -c.start)
+        if inner:
+            rest = q
+            for c in inner:
+                rest = rest[: c.start - m.start(1)] + rest[c.end - m.start(1) :]
+            if not re.sub(r"[\s\[\]()]", "", rest):
+                continue  # `[a.py:3](/abs/a.py:3)`: a link written as code, still only a citation
         best: Citation | None = None
         best_d = window + 1
         for c in path_cites:
