@@ -3,6 +3,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from sourcemark.check import check_text
 from sourcemark.cite import extract
@@ -1485,6 +1486,55 @@ class OtherCopyTest(unittest.TestCase):
         self.assertEqual(check_text("`runtime/lib/sync.py:111` has `def plan(cols):`", s).checks[0].verdict, "quote_mismatch")
         # An absolute path names one file: no other copy is consulted.
         self.assertEqual(check_text("`/w/a/runtime/lib/sync.py:111` has `def plan(rows, *, strict):`", s).checks[0].verdict, "quote_mismatch")
+
+    def test_lines_are_judged_against_any_read_copy_of_a_relative_path(self):
+        # From real Codex rollouts: a repo read in several worktrees; the working directory
+        # bound the path to a copy whose reads miss the cited line.
+        s = Session(cwd="/w/a")
+        s.add(Observation("/w/a/runtime/lib/sync.py", 1, ["x"] * 5, "Read", None))
+        s.add(Observation("/w/b/runtime/lib/sync.py", 100, [f"line {n}" for n in range(100, 131)], "Read", None))
+        r = check_text("`runtime/lib/sync.py:111` runs it", s).checks[0]
+        self.assertEqual((r.verdict, r.resolved_path), ("verified", "/w/b/runtime/lib/sync.py"))
+        self.assertEqual(check_text("`runtime/lib/sync.py:150` runs it", s).checks[0].verdict, "unread_lines")
+        self.assertEqual(check_text("`runtime/lib/sync.py:111` has `line 99`", s).checks[0].verdict, "quote_mismatch")
+        self.assertEqual(check_text("`/w/a/runtime/lib/sync.py:111`", s).checks[0].verdict, "unread_lines")
+
+    def test_a_bare_name_is_not_moved_to_an_unrelated_copy(self):
+        # From a real rollout: `README.md:17` "installs @v0.2.0"; the only README whose line 17
+        # was read belongs to another repo and installs @v0.3.0.
+        s = Session(cwd="/job")
+        s.add(Observation("/job/README.md", 1, ["# Job"], "Read", None))
+        s.add(Observation("/other/README.md", 1, [f"line {n}" for n in range(1, 31)], "Read", None))
+        self.assertEqual(check_text("`README.md:17` installs `@v0.2.0`.", s).checks[0].verdict, "unread_lines")
+
+
+class CodexMemoryCitationTest(unittest.TestCase):
+    """Codex lists the memories it used in <oai-mem-citation>; the paths are under its memories dir."""
+
+    def test_entries_resolve_under_the_codex_memories_directory(self):
+        with tempfile.TemporaryDirectory() as home:
+            mem = os.path.join(home, "memories", "MEMORY.md")
+            s = Session(cwd="/proj")
+            s.add(Observation("/proj/MEMORY.md", 1, ["# project"] * 3, "Read", None))
+            s.add(Observation(mem, 1, [f"m{n}" for n in range(1, 2001)], "Bash", None))
+            text = ("Done.\n<oai-mem-citation>\n<citation_entries>\n"
+                    "MEMORY.md:1725-1727|note=[prior guidance]\n</citation_entries>\n</oai-mem-citation>")
+            with mock.patch.dict(os.environ, {"CODEX_HOME": home}):
+                r = check_text(text, s).checks[0]
+                self.assertEqual((r.verdict, r.resolved_path), ("verified", mem))
+                # Outside the block the same name is still the working directory's file.
+                r = check_text("See MEMORY.md:1725.", s).checks[0]
+                self.assertEqual((r.verdict, r.resolved_path), ("unread_lines", "/proj/MEMORY.md"))
+
+    def test_an_entry_missing_from_the_memories_directory_keeps_its_own_path(self):
+        # From a real rollout: an entry relative to the working directory, not the memories dir.
+        with tempfile.TemporaryDirectory() as home:
+            s = Session(cwd="/u")
+            s.add(Observation("/u/notes/memory/pool.md", 1, [f"p{n}" for n in range(1, 41)], "Read", None))
+            text = "<oai-mem-citation>\nnotes/memory/pool.md:12-26|note=[pool doctrine]\n</oai-mem-citation>"
+            with mock.patch.dict(os.environ, {"CODEX_HOME": home}):
+                r = check_text(text, s).checks[0]
+            self.assertEqual((r.verdict, r.resolved_path), ("verified", "/u/notes/memory/pool.md"))
 
 
 class MisquotedNameTest(unittest.TestCase):

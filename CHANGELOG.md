@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Codex memory citations (`MEMORY.md:72-103|note=[...]` entries inside `<oai-mem-citation>`)
+  are looked up in the Codex memories directory (`$CODEX_HOME/memories`) first. The working
+  directory often holds an unrelated `MEMORY.md`. An entry that is not there keeps its own
+  path (`notes/memory/x.md`).
+- A relative citation with a directory part (`runtime/lib/x.py:111`) whose lines were not read in
+  the copy the working directory picked is now judged against the session's other read copies,
+  as quote mismatches already were (one repo read in several worktrees). A bare name
+  (`README.md:17`) is not: it can name unrelated files.
+
 ## 0.5.1 — 2026-10-03
 
 - Verify CI/release demos against the installed package with `--installed`, without the

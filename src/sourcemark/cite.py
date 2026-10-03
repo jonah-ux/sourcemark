@@ -6,6 +6,7 @@ Recognized forms (paths may be relative or absolute):
 * ``path/to/file.py#L42`` and ``path/to/file.py#L42-L50``
 * markdown links ``[label](path/to/file.py#L42-L50)``
 * inline tokens ``[sm:7f3a9c2b1d]`` that refer to a stored mark
+* Codex ``<oai-mem-citation>`` entries (``MEMORY.md:72-103|note=[...]``), rooted at its memories dir
 
 A nearby inline-code span or quoted string is captured as the citation's
 claimed quote, so the checker can confirm the quoted text really is there.
@@ -13,6 +14,7 @@ claimed quote, so the checker can confirm the quoted text really is there.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -68,6 +70,7 @@ class Citation:
     url: str | None = None
     claimed_quotes: list[str] = field(default_factory=list)
     form: str = ""
+    root: str | None = None  # a directory the relative path is first looked up in
 
 
 def _lines(m: re.Match[str]) -> tuple[int | None, int | None]:
@@ -146,9 +149,27 @@ def extract(
         found.append(Citation(m.group(0), m.start(), m.end(), token=m.group("tok"), form="token"))
 
     found.sort(key=lambda c: c.start)
+    _root_memory_entries(text, found)
     _attach_quotes(text, found, quote_window)
     return found
 
+
+# Codex appends the memories it used as entries ("MEMORY.md:72-103|note=[...]") inside an
+# <oai-mem-citation> block; their paths are relative to the Codex memories directory, not to
+# the working directory (which often holds an unrelated MEMORY.md). Some entries are relative to
+# home instead ("notes/memory/x.md"), so the root is a first guess, not a rewrite.
+_MEM_BLOCK = re.compile(r"<oai-mem-citation>.*?(?:</oai-mem-citation>|\Z)", re.S)
+
+
+def _root_memory_entries(text: str, cites: list[Citation]) -> None:
+    blocks = [(m.start(), m.end()) for m in _MEM_BLOCK.finditer(text)]
+    if not blocks:
+        return
+    root = os.path.join(os.environ.get("CODEX_HOME") or "~/.codex", "memories")
+    for c in cites:
+        if (c.path and not c.path.startswith(("/", "~")) and text.startswith("|note=", c.end)
+                and any(a <= c.start < b for a, b in blocks)):
+            c.root = root
 
 def _attach_quotes(text: str, cites: list[Citation], window: int) -> None:
     """Give each inline-code quote to exactly ONE citation: the nearest one in the same sentence,
