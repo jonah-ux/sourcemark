@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-10-02
 
 Learned from the real Claude Code citations the independent oracle saw but the checker flagged `unread_lines`: 55 open cases are down to 26. Every fix has a regression test built from the real failing shape.
 
