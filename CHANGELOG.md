@@ -15,6 +15,24 @@
 - Require annotated release identity, source tests, installed export regressions, and exact
   demo-result assertions before publication.
 
+### Codex coverage
+
+Learned from the real Codex citations the oracle saw but the checker still flagged on v0.5.0. Each fix has a regression test built from the real cell.
+
+Against v0.5.0 on the same data:
+
+- **Stored oracle-seen Codex citations that verify:** 3,018 → 3,101.
+- **Codex hard bench:** agreement 77.82% → 77.93%.
+- **Real A/B, 17,001 Codex and 1,069 Claude Code citations:** 18 Codex verdicts improved, 0 newly failing.
+- **Both benches:** 0 false flags, recall 100%.
+
+A random sample of the remaining Codex misses is mostly correct flags: lines in cut output or never printed.
+
+- **`\` + newline inside JS strings.** A multi-line `cmd` template with shell line continuations left the whole cell unread: the literal pattern did not let a backslash escape a newline.
+- **Print templates as frames.** A loop such as ``text(r.output); text(`--- exit=${r.exit_code} ---`)`` is split at the lines its own templates print, before or after each output, when such a line occurs exactly once per command. Literal text must frame it; `${...}` matches anything.
+- **Calls in different directories.** Outputs printed one after another are read as `cd W1; cmd1; cd W2; cmd2`, so each command's relative paths resolve where it ran.
+- **`nl` slices of files that changed since.** When a file's current length would cap a slice, the split is retried without the caps. It still fails closed: a slice that should have printed and got nothing voids the split.
+
 ## 0.5.0 — 2026-10-02
 
 Learned from the real Codex citations the independent oracle saw but the checker flagged. Every fix has a regression test built from the real cell shape.
