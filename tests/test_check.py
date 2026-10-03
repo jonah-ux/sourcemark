@@ -429,9 +429,16 @@ class StrictnessTest(unittest.TestCase):
         out = from_shell('echo "--- a"; sed -n 5,6p /r/a.ts; echo "--- b"; sed -n 10,11p /r/b.ts', "--- a\nA5\nA6\n--- b\nB10\nB11\n", "/w")
         got = sorted((o.path, o.line_start, tuple(o.lines)) for o in out)
         self.assertEqual(got, [("/r/a.ts", 5, ("A5", "A6")), ("/r/b.ts", 10, ("B10", "B11"))])
-        # A command between a marker and the read pollutes the chunk: file-level only.
+        # A command between a marker and the read pollutes the chunk: the text is not attributed,
+        # only the line numbers `sed -n 5,6p` printed (as without markers).
         out = from_shell('echo "--- a"; git status; sed -n 5,6p /r/a.ts', "--- a\nM x\nA5\nA6\n", "/w")
-        self.assertEqual([(o.path, o.line_start) for o in out], [("/r/a.ts", 0)])
+        self.assertEqual(sorted((o.path, o.tool, tuple(o.line_numbers or [])) for o in out),
+                         [("/r/a.ts", "Bash-range", (5, 6)), ("/r/a.ts", "Bash-touch", ())])
+        self.assertTrue(all(t is None for o in out for t in o.lines))
+        # From a real session: a loop that unrolls into echo markers keeps the later read's numbers.
+        out = from_shell('for n in m1 vps; do echo "== $n"; ssh $n hostname; done; sed -n 10240,10242p /r/p',
+                         "== m1\nm1\n== vps\nvps\nl1\nl2\nl3\n", "/w")
+        self.assertIn(("/r/p", (10240, 10241, 10242)), [(o.path, tuple(o.line_numbers or [])) for o in out])
         # A marker that never appears in stdout: no attribution.
         out = from_shell('echo "--- a"; sed -n 5,6p /r/a.ts; sed -n 1,2p /r/b.ts', "A5\nA6\nB1\nB2\n", "/w")
         self.assertTrue(all(o.line_start == 0 for o in out))
@@ -1423,6 +1430,20 @@ class LinkAsCodeTest(unittest.TestCase):
         got = {c.raw: c.claimed_quotes for c in extract(t)}
         self.assertTrue(all(not q.startswith("[") for qs in got.values() for q in qs), got)
         self.assertIn(["_start_work(x)"], list(got.values()))
+
+
+class OtherCopyTest(unittest.TestCase):
+    """From a real Codex rollout: one relative path read in two worktrees with different text."""
+
+    def test_a_quote_is_judged_against_any_read_copy_of_a_relative_path(self):
+        s = Session(cwd="/elsewhere")
+        s.add(Observation("/w/a/runtime/lib/sync.py", 110, ["x", "def plan(rows):", "y"], "Read", None))
+        s.add(Observation("/w/longer-name/runtime/lib/sync.py", 110, ["x", "def plan(rows, *, strict):", "y"], "Read", None))
+        r = check_text("`runtime/lib/sync.py:111` has `def plan(rows, *, strict):`", s).checks[0]
+        self.assertEqual((r.verdict, r.resolved_path), ("verified", "/w/longer-name/runtime/lib/sync.py"))
+        self.assertEqual(check_text("`runtime/lib/sync.py:111` has `def plan(cols):`", s).checks[0].verdict, "quote_mismatch")
+        # An absolute path names one file: no other copy is consulted.
+        self.assertEqual(check_text("`/w/a/runtime/lib/sync.py:111` has `def plan(rows, *, strict):`", s).checks[0].verdict, "quote_mismatch")
 
 
 class MisquotedNameTest(unittest.TestCase):
