@@ -1626,6 +1626,218 @@ def _labelled_batch_evidence(code: str, text: str, cwd: str | None, at: str | No
     return res
 
 
+_JS_TOKEN = re.compile(r"\s*(?:(" + _JS_LIT + r")|(-?\d+(?:\.\d+)?|true|false|null|undefined)|(\[)|(\])|(,))", re.S)
+_JS_ARRAY_DECL = re.compile(r"\b(?:const|let|var)\s+(\w+)\s*=\s*\[")
+_JS_MAP = re.compile(
+    r"\b(\w+)\.map\(\s*(?:async\s*)?(?:\(\s*\[([^\]]*)\]\s*(?:,\s*\w+\s*)?\)|\(\s*(\w+)\s*(?:,\s*\w+\s*)?\)|(\w+))\s*=>"
+)
+# A JS string literal, including templates with simple ``${...}`` substitutions.
+_JS_STR = r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|`(?:[^`\\$]|\\.|\$(?!\{)|\$\{[^{}`]*\})*`"
+_JS_CALL_TPL = re.compile(r"tools\.exec_command\(\s*\{(?P<obj>(?:[^{}`\"']|" + _JS_STR + r")*)\}\s*\)", re.S)
+_JS_ARG = re.compile(r"\s*(?:(?:\"(\w+)\"|'(\w+)'|(\w+))\s*:\s*(" + _JS_STR + r"|-?\d+(?:\.\d+)?|[A-Za-z_][\w.]*)|(\w+))\s*,?", re.S)
+_JS_SUB = re.compile(r"\$\{\s*(?:JSON\.stringify\(\s*(\w+)\s*\)|(\w+))\s*\}")
+_SHELL_SAFE = re.compile(r"[^'\"`$\\\n]*")
+
+
+def _js_array(code: str, i: int) -> list[Any] | None:
+    """The JS array literal opening at ``code[i]``: strings decoded, other literals None, nested
+    arrays as lists. None when an element is computed."""
+    stack: list[list[Any]] = [[]]
+    pos = i + 1
+    while True:
+        m = _JS_TOKEN.match(code, pos)
+        if not m:
+            return None
+        pos = m.end()
+        lit, other, opn, cls, _comma = m.groups()
+        if lit is not None:
+            stack[-1].append(_js_string(lit))
+        elif other is not None:
+            stack[-1].append(None)
+        elif opn:
+            stack[-1].append([])
+            stack.append(stack[-1][-1])
+        elif cls:
+            done = stack.pop()
+            if not stack:
+                return done
+
+
+def _js_call_args(code: str, start: int) -> dict[str, str] | None:
+    """The argument object of the first ``tools.exec_command({...})`` at or after ``start``, as raw
+    JS source per key (``cmd`` shorthand becomes ``cmd: cmd``)."""
+    m = _JS_CALL_TPL.search(code, start)
+    if not m or m.start() - start > 800:
+        return None
+    obj, pos, args = m.group("obj"), 0, {}
+    while pos < len(obj.rstrip()):
+        pm = _JS_ARG.match(obj, pos)
+        if not pm or pm.end() == pos:
+            return None
+        if pm.group(5):
+            args[pm.group(5)] = pm.group(5)
+        else:
+            args[pm.group(1) or pm.group(2) or pm.group(3)] = pm.group(4)
+        pos = pm.end()
+    return args
+
+
+def _cell_commands(code: str) -> list[dict[str, Any]] | None:
+    """The commands a multi-command Codex cell ran, in order: ``{"cmd", "labels", "workdir"}``.
+    From a list mapped over (``cmds.map(([name, cmd]) => tools.exec_command({cmd}))``, or a
+    ``${path}`` template), or from literal calls written out one by one. None if unknown."""
+    consts = {m.group(1): _js_string(m.group(2)) for m in _JS_CONST.finditer(code)}
+    arrays = {}
+    for m in _JS_ARRAY_DECL.finditer(code):
+        arr = _js_array(code, m.end() - 1)
+        if arr:
+            arrays[m.group(1)] = arr
+
+    def value(src: str | None, env: dict[str, Any]) -> str | None:
+        if src is None:
+            return None
+        if src[0] in "\"'":
+            return _js_string(src)
+        if src[0] == "`":
+            body = src[1:-1]
+
+            def sub(sm: re.Match[str]) -> str:
+                v = env.get(sm.group(1) or sm.group(2))
+                if not isinstance(v, str) or not _SHELL_SAFE.fullmatch(v):
+                    raise KeyError
+                return f'"{v}"' if sm.group(1) else v
+
+            try:
+                body = _JS_SUB.sub(sub, body)
+            except KeyError:
+                return None
+            return None if "${" in body else _js_string("`" + body + "`")
+        if src in env:
+            v = env[src]
+            return v if isinstance(v, str) else None
+        return consts.get(src)
+
+    for m in _JS_MAP.finditer(code):
+        items = arrays.get(m.group(1))
+        args = _js_call_args(code, m.end())
+        if not items or args is None or "cmd" not in args:
+            continue
+        names = [x.strip() for x in m.group(2).split(",")] if m.group(2) is not None else [m.group(3) or m.group(4)]
+        out = []
+        for item in items:
+            if m.group(2) is not None:
+                if not isinstance(item, list):
+                    return None
+                env = {n: v for n, v in zip(names, item) if n}
+                labels = [v for v in item if isinstance(v, str)]
+            else:
+                env = {names[0]: item}
+                labels = [item] if isinstance(item, str) else []
+            cmd = value(args["cmd"], env)
+            if cmd is None:
+                return None
+            out.append({"cmd": cmd, "labels": labels, "workdir": value(args.get("workdir"), env)})
+        return out
+    literal = codex_batch_commands(code)
+    if len(literal) >= 2:
+        return [{"cmd": a["cmd"], "labels": [a["cmd"]], "workdir": a.get("workdir") if isinstance(a.get("workdir"), str) else None} for a in literal]
+    return None
+
+
+def _json_results(text: str) -> list[dict[str, Any]] | None:
+    """Results printed as JSON (``text(r.value)``, ``JSON.stringify({cmd, output})``)."""
+    dec, pos, vals = json.JSONDecoder(), 0, []
+    s = text.strip()
+    while pos < len(s):
+        while pos < len(s) and s[pos] in " \t\r\n,":
+            pos += 1
+        if pos >= len(s):
+            break
+        try:
+            v, pos = dec.raw_decode(s, pos)
+        except ValueError:
+            return None
+        vals.extend(v if isinstance(v, list) else [v])
+    out = []
+    for v in vals:
+        if isinstance(v, dict) and v.get("status") == "fulfilled" and isinstance(v.get("value"), dict):
+            v = v["value"]
+        if not isinstance(v, dict) or not isinstance(v.get("output"), str):
+            return None
+        out.append(v)
+    return out or None
+
+
+def _header_chunks(items: list[dict[str, Any]], text: str) -> list[str] | None:
+    """Split output printed as ``<prefix><label><suffix>`` header lines, one per command, in order.
+    The header shape is learned from the output: it must match exactly one whole line per
+    command, and frame the label with something (a bare label line could be file content)."""
+    lines = text.split("\n")
+    width = min((len(it["labels"]) for it in items), default=0)
+    candidates = [[it["labels"][j] for it in items] for j in range(width)]
+    candidates += [[str(i + 1) for i in range(len(items))], [str(i) for i in range(len(items))]]
+    for labels in candidates:
+        if len(set(labels)) != len(labels):
+            continue
+        first = labels[0]
+        for line in dict.fromkeys(x for x in lines if first in x):
+            k = line.index(first)
+            pre, suf = line[:k], line[k + len(first) :]
+            if not (pre + suf).strip():
+                continue
+            pos, bounds = 0, []
+            for lab in labels:
+                hits = [i for i, x in enumerate(lines) if x == pre + lab + suf]
+                if len(hits) != 1 or hits[0] < pos:
+                    break
+                bounds.append(hits[0])
+                pos = hits[0] + 1
+            else:
+                return ["\n".join(lines[a + 1 : b]) for a, b in zip(bounds, [*bounds[1:], len(lines)])]
+    return None
+
+
+def _cell_batch_evidence(code: str, text: str, cwd: str | None, at: str | None, cut: bool) -> list[Observation] | None:
+    """Evidence from a cell that ran several commands and printed each output whole, either as
+    JSON results or under a header line per command. Lines that carry their own numbers always
+    count; a plain slice (``sed -n 'A,Bp' f``) only when the output is known to be exactly the
+    command's (JSON, or a header template that prints nothing after the output) and uncut."""
+    items = _cell_commands(code)
+    if not items:
+        return None
+    chunks: list[str | None]
+    exact = False
+    results = _json_results(text)
+    if results is not None:
+        exact = True
+        if all(isinstance(r.get("cmd"), str) for r in results):
+            by_cmd = {r["cmd"]: r for r in results}
+            picked = [by_cmd.get(it["cmd"]) for it in items]
+        elif len(results) == len(items):
+            picked = list(results)
+        else:
+            return None
+        chunks = [None if r is None or r.get("exit_code") else r["output"] for r in picked]
+    else:
+        found = _header_chunks(items, text)
+        if found is None:
+            return None
+        chunks = list(found)
+        exact = bool(re.search(r"text\(\s*`[^`]*\\n\$\{[\w.\[\]]+\.output\}`\s*\)", code))
+    res: list[Observation] = []
+    for it, chunk in zip(items, chunks):
+        if chunk is None:
+            continue
+        chunk = chunk.rstrip("\n") + "\n"
+        wd = it["workdir"]
+        ecwd = os.path.join(cwd, wd) if wd and cwd and not os.path.isabs(wd) else (wd or cwd)
+        cmd = expand_assignments(it["cmd"])
+        for o in from_shell(_CD.sub("", cmd, count=1), chunk, effective_cwd(cmd, ecwd), at):
+            if o.line_numbers or (exact and not cut and o.lines and o.tool == "Bash"):
+                res.append(o)
+    return res
+
+
 def _codex_text(out: Any) -> str:
     """Codex splits one output into parts ("...Output:\\n", then the stdout): concatenate them as
     they are. Joining with newlines would insert a line and shift every line number by one."""
@@ -1696,8 +1908,11 @@ def read_codex_transcript(path: str) -> tuple[Session, list[tuple[str, str]]]:
                     continue
                 if cell is None:
                     if "tools.exec_command" in code:
-                        _cut, uncut = _codex_uncut(stdout)
-                        for o in _batch_grep_evidence(code, uncut, cwd, at) + _labelled_batch_evidence(code, uncut, cwd, at):
+                        cut, uncut = _codex_uncut(stdout)
+                        batch = _cell_batch_evidence(code, uncut, cwd, at, cut)
+                        if batch is None:
+                            batch = _labelled_batch_evidence(code, uncut, cwd, at)
+                        for o in _batch_grep_evidence(code, uncut, cwd, at) + batch:
                             sess.add(o)
                     continue
                 args, form = cell
