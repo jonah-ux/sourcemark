@@ -1019,16 +1019,49 @@ class CodexRolloutTest(unittest.TestCase):
         for cite in ("a.py:40-42", "a.py:7", "a.py:70"):
             self.assertEqual(check_text(cite, sess).checks[0].verdict, "verified", cite)
 
+    def test_template_cmd_with_line_continuations_is_read(self):
+        """From a real rollout: a multi-line `cmd` template with `\\` + newline continuations."""
+        from sourcemark.observe import read_transcript
+
+        d = self.d
+        code = ('const r = await tools.exec_command({\n  cmd: `printf \'%%s\\\\n\' \'--- hits ---\'\n'
+                'git grep -n -E \'x4[12] \' -- \\\n  a.py`,\n  workdir: "%s",\n  yield_time_ms: 10000\n});\ntext(r.output);' % d)
+        sess, _ = read_transcript(self.rollout(d, [(code, "--- hits ---\na.py:41:x41 = 41\na.py:42:x42 = 42\n")]))
+        self.assertEqual(check_text("a.py:41-42", sess).checks[0].verdict, "verified")
+
+    def test_footer_frames_and_calls_in_different_directories(self):
+        """From real rollouts: `text(r.output); text(`--- exit=${r.exit_code} ---`)`, and literal
+        calls whose outputs are printed bare but ran in different working directories."""
+        from sourcemark.observe import read_transcript
+
+        d = self.d
+        os.makedirs(os.path.join(d, "sub"))
+        with open(os.path.join(d, "sub", "b.md"), "w") as fh:
+            fh.write("y\n" * 400)
+        footer = ('const results = await Promise.all([\n'
+                  '  tools.exec_command({cmd:"grep -n \'x3[34] \' a.py",workdir:"%s"}),\n'
+                  '  tools.exec_command({cmd:"git status --short",workdir:"%s"})\n]);\n'
+                  'for (const r of results) { text(r.output); text(`\\n--- exit=${r.exit_code} session=${r.session_id ?? ""} ---\\n`); }' % (d, d))
+        footer_out = "33:x33 = 33\n34:x34 = 34\n\n--- exit=0 session= ---\n M a.py\n\n--- exit=0 session= ---\n"
+        dirs = ('const results = await Promise.all([\n'
+                '  tools.exec_command({cmd:"rg -n \'^y\' b.md | head -2",workdir:"%s/sub"}),\n'
+                '  tools.exec_command({cmd:"uname",workdir:"%s"})\n]);\n'
+                'for (const r of results) text(r.output);' % (d, d))
+        dirs_out = "1:y\n2:y\nDarwin\n"
+        sess, _ = read_transcript(self.rollout(d, [(footer, footer_out), (dirs, dirs_out)]))
+        for cite in ("a.py:33-34", "sub/b.md:2"):
+            self.assertEqual(check_text(cite, sess).checks[0].verdict, "verified", cite)
+
     def test_batch_cells_with_unknown_split_give_no_lines(self):
         from sourcemark.observe import read_transcript
 
         d = self.d
-        # Headers that do not frame each label exactly once, and a cell whose output may carry text
-        # after each output: no plain slices are credited.
+        # A header that does not frame each command exactly once, and a cell whose output may carry
+        # text after each output: no plain slices are credited.
         dup = ('const paths = ["%s/a.py", "%s/a.py"];\n'
                'const rs = await Promise.all(paths.map(p => tools.exec_command({cmd: `sed -n \'10,11p\' \'${p}\'`})));\n'
                'rs.forEach((r,i)=>{ text(`--- ${paths[i]} ---\\n${r.output}`); });' % (d, d))
-        dup_out = "--- {0}/a.py ---\nx10 = 10\nx11 = 11\n--- {0}/a.py ---\nx10 = 10\nx11 = 11\n".format(d)
+        dup_out = "--- {0}/a.py ---\nx10 = 10\nx11 = 11\nx10 = 10\nx11 = 11\n".format(d)  # a header went missing
         tail = ('const cmds = [["one", "sed -n \'30,31p\' a.py"], ["two", "uname"]];\n'
                 'const rs = await Promise.all(cmds.map(async ([name, cmd]) => ({name, ...(await tools.exec_command({cmd, workdir: "%s"}))})));\n'
                 'for (const r of rs) text(`## ${r.name}\\n${r.output}\\n(exit ${r.exit_code})`);' % d)
@@ -1325,6 +1358,14 @@ class SelfNumberedAndBatchTest(unittest.TestCase):
         cmd = "bash -lc 'nl -ba lib/a.py | sed -n \"18,19p\"; nl -ba lib/b.py | sed -n \"200,201p;250,250p\"; nl -ba lib/b.py | sed -n \"280,281p\"'"
         out = "    18\ta\n    19\ta\n   200\tb\n   201\tb\n   250\tb\n   280\tb\n   281\tb\n"
         self.assertEqual(self.nums(from_shell(cmd, out, self.d)), {("a.py", 18), ("a.py", 19), ("b.py", 200), ("b.py", 201), ("b.py", 250), ("b.py", 280), ("b.py", 281)})
+
+    def test_slices_of_files_that_changed_since_still_split(self):
+        # From a real rollout: a.py had more lines then than now, so its current length would cap
+        # the slice that printed 400-401 and wrongly leave those lines to no one.
+        out = "    10\ta\n    11\ta\n   400\ta\n   401\ta\n    20\tb\n"
+        cmd = "nl -ba lib/a.py | sed -n '10,11p'; nl -ba lib/a.py | sed -n '400,401p'; nl -ba lib/b.py | sed -n '20p'"
+        got = self.nums(from_shell(cmd, out, self.d))
+        self.assertTrue({("a.py", 400), ("a.py", 401), ("b.py", 20)} <= got, got)
 
     def test_a_boundary_no_range_can_place_stays_file_level(self):
         # gone.py's length is unknown: it may have ended at 60, so 61-62 could be b.py's.
