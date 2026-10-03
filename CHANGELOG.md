@@ -10,6 +10,13 @@
   the copy the working directory picked is now judged against the session's other read copies,
   as quote mismatches already were (one repo read in several worktrees). A bare name
   (`README.md:17`) is not: it can name unrelated files.
+- Re-anchoring a whole-line quote after an edit:
+  - A fuzzy hit is also scored as a window as tall as the quote. Rounding it out to whole lines
+    could take in a line the edit added (a new `bin` entry before `},`) and drop the match.
+  - Following a block through git history, the quoted lines are scored against the lines they
+    became, not against the inserted lines too.
+  - History bench (2,591 real cases): `edited_similar` 90.0% → 92.0%, every other category the
+    same. Stored failures: 67 → 70 fully correct, 88 → 91 right status, none newly failing.
 
 ## 0.5.1 — 2026-10-03
 
