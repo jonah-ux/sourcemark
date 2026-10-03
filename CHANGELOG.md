@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased
+
+Learned from the real Codex citations the independent oracle saw but the checker flagged. Every fix has a regression test built from the real cell shape.
+
+Measured against v0.4.0 on the same real data:
+
+- **Stored oracle-seen Codex citations:** 8,471, of which 3,018 now verify (995 before).
+- **Codex hard bench, 600 rollouts:** agreement with the oracle 72.87% → 77.69%, recall 99.61% → 99.83%, 0 false flags.
+- **Real-verdict A/B, 16,203 Codex and 1,092 Claude Code citations:** 968 Codex verdicts improved and 0 became newly failing. Each verdict change was inspected; every new verification was checked against the file on disk.
+- **Claude Code hard bench:** recall 99.67% → 99.89%, 0 false flags.
+- **Resolver history:** no changes.
+
+### Codex cells that run several commands
+
+- **Lists of commands.** Three kinds of cell are now read command by command:
+  - a tuple list mapped over: `cmds.map(([name, cmd]) => tools.exec_command({cmd}))`;
+  - a list of paths put into a command template: `` `nl -ba ${JSON.stringify(path)} | sed -n '1,120p'` ``;
+  - literal calls written out in `Promise.all([...])`.
+- **Finding each command's output.** Three ways, in order:
+  - JSON results are paired with their command;
+  - otherwise the output is split at a header line per command (`=== name ===`, `--- path ---`, `---RESULT 2---`). The header shape is learned from the output: it must match exactly one whole line per command, in order;
+  - a cell that only prints each output, one after another, is read as the commands joined in sequence.
+- **What counts.** Lines that carry their own numbers always count. A plain slice counts only when the output is known to be exactly the command's, and uncut.
+
+### Shell evidence (Claude Code and Codex)
+
+- **`nl -ba` / `cat -n` slices split by what each can print.** Several slices printed one after another are now told apart even when the numbers keep rising: each starts at its `sed` range, runs on line by line, and jumps only between its own ranges. Beside other commands (a grep, a jq), only lines in the exact six-column `nl` shape count, and only when no other command could print numbered lines.
+- **A one-file grep printed first or last** owns the ascending run of `N:hit` lines at that end of the output, when nothing else in the command prints bare numbered lines.
+- **`bash -lc '...'`, `sh -c "..."` and `worker-lifecycle run ... --`** are read as the script they run.
+- **Literal `for` loops are unrolled**: `for f in a b; do echo "== $f"; nl -ba "$f"; done` is read as the commands it ran. Loops over globs, command output or `${f%...}` expansions are not.
+
+### Checker
+
+- **A relative path read in several copies** (a repo and its worktrees): when the chosen copy's text does not match a quote, the citation is judged against the other read copies that cover the cited lines. An absolute path still names one file.
+- **Line numbers survive echo fences.** A `sed -n A,Bp f` that shares a fenced chunk with another command keeps the line numbers it printed. Before, the fence split dropped them, which the old fallback kept.
+
+### Faster
+
+- The command splitter skips plain runs in one step and caches its results: 0 differences on 32,915 real commands.
+- Line counts are cached per file version.
+- Reading 300 recent Codex rollouts took 117 s instead of 165 s; the slowest dropped from 17 s to 10 s.
+
 ## 0.4.0 — 2026-10-02
 
 Learned from the real Claude Code citations the independent oracle saw but the checker flagged `unread_lines`: 55 open cases are down to 26. Every fix has a regression test built from the real failing shape.
