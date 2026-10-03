@@ -10,6 +10,7 @@ even if the file changes later.
 
 from __future__ import annotations
 
+import fnmatch
 import functools
 import json
 import os
@@ -185,7 +186,12 @@ def from_grep_text(
         if not roots:
             return True
         rp = _realpath(p)
-        return any(rp == r or rp.startswith(r.rstrip(os.sep) + os.sep) for r in roots)
+        if any(rp == r or rp.startswith(r.rstrip(os.sep) + os.sep) for r in roots):
+            return True
+        # An unexpanded glob root (`~/x/*/lib/f.py`): the shell searched whatever it matched.
+        # Brackets stay literal: they are Next.js route segments (`[id]`) far more often than classes.
+        pats = [r.replace("[", "[[]").rstrip(os.sep) for r in roots if "*" in r or "?" in r]
+        return any(fnmatch.fnmatchcase(c, pat) or fnmatch.fnmatchcase(c, pat + os.sep + "*") for pat in pats for c in (rp, os.path.normpath(p)))
 
     match_paths: set[str] = set()
     for raw in lines:
@@ -478,7 +484,27 @@ def _single_target(args: list[str], cwd: str | None, tool: str = "grep") -> str 
         return None
     p = os.path.expanduser(files[0])
     p = os.path.normpath(p if os.path.isabs(p) or not cwd else os.path.join(cwd, p))
-    return p if _isfile(p) else None
+    if _isfile(p):
+        return p
+    return p if _vanished_grep_file(files[0], p, args, tool) else None
+
+
+def _vanished_grep_file(operand: str, p: str, args: list[str], tool: str) -> bool:
+    """A one-operand grep whose file is gone now (a removed worktree, a deleted temp file).
+
+    Plain grep never descends into a directory without -r or ``-d recurse``, so bare "N:text"
+    hits can only have come from that one file. rg recurses by default and globs could have
+    expanded to another file, so neither is trusted; nor is anything still present here.
+    """
+    if tool != "grep" or any(ch in operand for ch in "*?{"):
+        return False
+    parts = p.split(os.sep)
+    if not (os.path.isabs(p) and len(parts) > 3 and not _root_present(os.sep.join(parts[:3]))) and os.path.lexists(p):
+        return False  # still here, and not a regular file
+    if any(a in ("-d", "--directories=recurse", "--recursive") or a.startswith("--directories") for a in args):
+        return False
+    base = os.path.basename(p)
+    return "." in base.lstrip(".")  # a file name, not a directory name
 
 
 def _numbered(args: list[str]) -> bool:
@@ -580,6 +606,82 @@ _LINE_FILTER = re.compile(
 _NUMBERED_LINE = re.compile(r"^\s*(\d+)\t(.*)$")
 
 
+def _git_top(d: str) -> str | None:
+    """The work tree holding ``d``, if it is still here."""
+    parts = d.split(os.sep)
+    if os.path.isabs(d) and len(parts) > 3 and not _root_present(os.sep.join(parts[:3])):
+        return None
+    while d and d != os.path.dirname(d):
+        if os.path.exists(os.path.join(d, ".git")):
+            return d
+        d = os.path.dirname(d)
+    return None
+
+
+def _git_show_file(argv: list[str], cwd: str | None) -> str | None:
+    """The file ``git [-C D] show REV:F`` prints whole, as an absolute path.
+
+    ``F`` is relative to the top of the work tree (``./F`` to the current directory). When the
+    work tree is gone the current directory stands in for its top: sessions run git there."""
+    if not argv or os.path.basename(argv[0]) != "git":
+        return None
+    i, base = 1, cwd
+    while i < len(argv) and argv[i] != "show":
+        if argv[i] == "-C" and i + 1 < len(argv):
+            d = os.path.expanduser(argv[i + 1])
+            base = d if os.path.isabs(d) or not base else os.path.join(base, d)
+            i += 2
+        elif argv[i] == "--no-pager":
+            i += 1
+        else:
+            return None
+    rest = argv[i + 1 :]
+    if len(rest) != 1 or rest[0].startswith("-") or ":" not in rest[0]:
+        return None
+    f = rest[0].split(":", 1)[1]
+    if not f or f.endswith("/"):
+        return None
+    if f.startswith(("./", "../")):
+        top = base
+    else:
+        top = (_git_top(base) if base else None) or base
+    if not top:
+        return None
+    return os.path.normpath(os.path.join(top, f))
+
+
+def _piped_source(stage: str, cwd: str | None) -> str | None:
+    """The one file a pipeline's first stage prints unchanged: ``cat F`` or ``git show REV:F``."""
+    try:
+        argv = _drop_redirects(shlex.split(stage))
+    except ValueError:
+        return None
+    if not argv:
+        return None
+    shown = _git_show_file(argv, cwd)
+    if shown:
+        return shown
+    if os.path.basename(argv[0]) == "cat" and len(argv) == 2 and not argv[1].startswith("-"):
+        f = os.path.expanduser(argv[1])
+        return os.path.normpath(f if os.path.isabs(f) or not cwd else os.path.join(cwd, f))
+    return None
+
+
+def _slice_start(argv: list[str]) -> int | None:
+    """Where the lines of ``sed -n 'A,Bp'`` / ``head [-n] N`` start in their input."""
+    if not argv:
+        return None
+    cmd, args = os.path.basename(argv[0]), argv[1:]
+    if cmd == "head":
+        ok = all(re.fullmatch(r"-\d+|-n\d*|\d+", a) for a in args)
+        return 1 if ok else None
+    if cmd == "sed":
+        scripts = [a for a in args if re.fullmatch(r"\d+(?:,\d+)?p", a)]
+        if args.count("-n") == 1 and len(scripts) == 1 and len(args) == 2:
+            return int(scripts[0].split(",")[0].rstrip("p"))
+    return None
+
+
 def _self_numbered(seg: str, cwd: str | None) -> str | None:
     """The file of ``nl -ba F | sed -n 'A,Bp'`` / ``cat -n F | head``: commands whose output lines
     carry their own line numbers, so where the slice starts does not matter."""
@@ -645,6 +747,29 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
         pipe = _unquoted_pipe(seg)
         if pipe is not None:
             first = seg[:pipe].strip()
+            source = _piped_source(first, cwd)
+            if source is not None:
+                stages = [x.strip() for x in _split_unquoted(seg[pipe + 1 :], pipes=True)]
+                try:
+                    sargv = [_drop_redirects(shlex.split(x)) for x in stages]
+                except ValueError:
+                    continue
+                tool = os.path.basename(sargv[0][0]) if sargv and sargv[0] else ""
+                if tool == "grep":
+                    via_e, ops = _grep_operands(sargv[0][1:], tool)
+                    if not (ops if via_e else ops[1:]):  # reads the piped file, not files of its own
+                        grep = grep_for(k, [*sargv[0], source])
+                        if grep is not None:
+                            extra.extend(grep)
+                    continue
+                start = _slice_start(sargv[0])
+                if start is not None and all(_slice_start(a) == 1 for a in sargv[1:]):
+                    lines = stdout.split("\n")
+                    if lines and lines[-1] == "":
+                        lines = lines[:-1]
+                    out.append(Observation(source, start, lines, "Bash", at))
+                    owner[len(out) - 1] = k
+                continue
             if first.startswith(("rg ", "grep ", "git grep ")):
                 try:
                     fargv = _drop_redirects(shlex.split(first))
@@ -663,6 +788,9 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
         if not argv:
             continue
         cmd, args = os.path.basename(argv[0]), argv[1:]
+        shown = _git_show_file(argv, cwd)
+        if shown:
+            cmd, args = "cat", [shown]
         if cmd == "head" and "-n" in args:
             i = args.index("-n")
             args = args[:i] + args[i + 2 :]  # drop "-n N"
