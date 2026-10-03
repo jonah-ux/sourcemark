@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 — 2026-10-02
+
+- **Misquoted names are caught (#69, #70).** A quote that is a single name is flagged only when it occurs nowhere in what was read of the file and a near-identical name was read (`forbidden_patternsX` for `forbidden_patterns`). Plural, separator and case variants, file names and paths, and text known only by line number are never flagged. 0 verdict changes over 17,759 real citations.
+- **Timestamped backup paths are extracted:** `config.yaml.bak-20260902-154450:80`.
+- **Lines inserted inside a cited block (#71, #72)** now resolve as `edited` instead of `orphaned`, when every quoted line survives in order within a modest spread.
+
 ## 0.3.0 — 2026-10-02
 
 ### Codex rollouts (#65, #66)
