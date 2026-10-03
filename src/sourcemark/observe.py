@@ -1000,16 +1000,44 @@ def _unwrap(seg: str) -> str:
 _HEREDOC_START = re.compile(r"<<(?P<dash>-?)\s*(['\"]?)(?P<word>[A-Za-z_]\w*)\2")
 
 
+_PLAIN_RUN = re.compile(r"[^'\"\\<\n;&|]+")  # nothing in it can start a quote, separator or heredoc
+_DQ_RUN = re.compile(r'[^"\\]+')
+
+
 def _split_unquoted(command: str, *, pipes: bool = False, newlines: bool = False) -> list[str]:
     """Split a shell command on ``&&``, ``;``, ``||`` (and ``|``/newlines if asked) outside quotes.
 
     A grep pattern like ``"a && b"`` is one argument, not two commands. If the quotes never
     balance (an apostrophe in a heredoc or comment), fall back to splitting on every separator."""
+    return list(_split_unquoted_cached(command, pipes, newlines))
+
+
+@functools.lru_cache(maxsize=8192)
+def _split_unquoted_cached(command: str, pipes: bool, newlines: bool) -> tuple[str, ...]:
     command = command.replace("\\\n", " ")  # line continuations
     seps = ["&&", "||", ";"] + (["|"] if pipes else []) + (["\n"] if newlines else [])
     out, cur, q, i, n = [], [], None, 0, len(command)
     heredocs: list[tuple[str, bool]] = []  # (terminator, tabs stripped) opened on this line
     while i < n:
+        # Skip plain runs in one step; only the characters below can change the state.
+        if not q:
+            m = _PLAIN_RUN.match(command, i)
+            if m:
+                cur.append(m.group())
+                i = m.end()
+                continue
+        elif q == "'":
+            j = command.find("'", i)
+            if j != i:
+                cur.append(command[i:] if j == -1 else command[i:j])
+                i = n if j == -1 else j
+                continue
+        else:
+            m = _DQ_RUN.match(command, i)
+            if m:
+                cur.append(m.group())
+                i = m.end()
+                continue
         ch = command[i]
         if not q and ch == "<" and command.startswith("<<", i) and not command.startswith("<<<", i):
             m = _HEREDOC_START.match(command, i)
@@ -1060,9 +1088,9 @@ def _split_unquoted(command: str, *, pipes: bool = False, newlines: bool = False
         i += 1
     if q:
         alt = "|".join(re.escape(x) for x in seps)
-        return [x.strip() for x in re.split(rf"\s*(?:{alt})\s*", command)]
+        return tuple(x.strip() for x in re.split(rf"\s*(?:{alt})\s*", command))
     out.append("".join(cur).strip())
-    return out
+    return tuple(out)
 
 
 def _unquoted_pipe(seg: str) -> int | None:
@@ -1082,6 +1110,15 @@ def _unquoted_pipe(seg: str) -> int | None:
 def _line_count(path: str) -> int | None:
     if not _isfile(path):
         return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return _line_count_of(path, st.st_mtime_ns, st.st_size)
+
+
+@functools.lru_cache(maxsize=4096)
+def _line_count_of(path: str, _mtime: int, _size: int) -> int | None:
     try:
         with open(path, "rb") as fh:
             return sum(1 for _ in fh)
@@ -1773,6 +1810,9 @@ def _header_chunks(items: list[dict[str, Any]], text: str) -> list[str] | None:
     The header shape is learned from the output: it must match exactly one whole line per
     command, and frame the label with something (a bare label line could be file content)."""
     lines = text.split("\n")
+    where: dict[str, list[int]] = {}
+    for i, x in enumerate(lines):
+        where.setdefault(x, []).append(i)
     width = min((len(it["labels"]) for it in items), default=0)
     candidates = [[it["labels"][j] for it in items] for j in range(width)]
     candidates += [[str(i + 1) for i in range(len(items))], [str(i) for i in range(len(items))]]
@@ -1780,14 +1820,13 @@ def _header_chunks(items: list[dict[str, Any]], text: str) -> list[str] | None:
         if len(set(labels)) != len(labels):
             continue
         first = labels[0]
-        for line in dict.fromkeys(x for x in lines if first in x):
-            k = line.index(first)
-            pre, suf = line[:k], line[k + len(first) :]
+        shapes = dict.fromkeys((x[: x.index(first)], x[x.index(first) + len(first) :]) for x in where if first in x)
+        for pre, suf in list(shapes)[:200]:
             if not (pre + suf).strip():
                 continue
             pos, bounds = 0, []
             for lab in labels:
-                hits = [i for i, x in enumerate(lines) if x == pre + lab + suf]
+                hits = where.get(pre + lab + suf, [])
                 if len(hits) != 1 or hits[0] < pos:
                     break
                 bounds.append(hits[0])
