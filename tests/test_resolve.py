@@ -526,6 +526,25 @@ class HistoryFollowTest(unittest.TestCase):
         r = resolve(m, search=False)
         self.assertNotIn(r.status, ("intact", "shifted"))
 
+    def test_a_block_that_gained_lines_is_scored_by_the_lines_it_quoted(self):
+        # From real history: a package.json bin map; the cited last entry gained a comma and
+        # two entries were added before the closing brace. Scoring the quote against the whole
+        # widened block (with the new entries) called it orphaned.
+        before = (
+            '{\n  "name": "tool",\n  "bin": {\n'
+            '    "tool-loop": "bin/tool-loop.mjs",\n    "tool-eval": "bin/tool-eval.mjs"\n  },\n'
+            '  "type": "module"\n}\n'
+        )
+        self.commit(before)
+        m = mark_lines(before, 4, 6, source_for(self.p))
+        after = before.replace(
+            '"bin/tool-eval.mjs"\n',
+            '"bin/tool-eval.mjs",\n    "tool-ask": "bin/tool-ask.mjs",\n    "tool-embed": "bin/tool-embed.mjs"\n',
+        ).replace('"name": "tool"', '"name": "tool-kit", "private": true')
+        self.commit(after)
+        r = resolve(m, search=False)
+        self.assertEqual((r.status, r.line_start), ("edited", 4))
+
     def test_edit_with_changed_surroundings_is_edited_not_orphaned(self):
         before = (
             "const a = 1;\n"

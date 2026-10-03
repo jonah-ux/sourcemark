@@ -149,7 +149,11 @@ def _follow_history(mark: Mark, doc: str, m: Match | None, old: str | None) -> t
             if all(i in kept for i in range(first, last + 1)):
                 sim = 0.95  # every quoted line is there unchanged; only lines were inserted
             else:
-                sim = difflib.SequenceMatcher(None, exact, doc[s0:s1], autojunk=False).ratio()
+                # Score the quoted lines against the lines they became; the inserted lines are
+                # already accounted for by the spread limit above.
+                lines = doc.split("\n")
+                became = "\n".join(lines[r] for r in rows)
+                sim = min(0.95, difflib.SequenceMatcher(None, exact, became[col:] if col else became, autojunk=False).ratio())
             if sim >= DEFAULT_MIN_SIMILARITY:
                 return Match(s0, s1, round(min(sim, 0.99), 4), "history-edit", 0.0), True
         return m, False
