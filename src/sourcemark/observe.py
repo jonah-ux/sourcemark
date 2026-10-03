@@ -522,9 +522,12 @@ def _numbered(args: list[str]) -> bool:
     )
 
 
-def _grep_evidence(argv: list[str], stdout: str, cwd: str | None, at: str | None, *, alone: bool, other_printers: bool = False) -> list[Observation] | None:
+def _grep_evidence(argv: list[str], stdout: str, cwd: str | None, at: str | None, *, alone: bool, other_printers: bool = False, edge: str | None = None) -> list[Observation] | None:
     """Line evidence from a grep/rg run, or None when its output cannot be read as numbered hits:
-    no -n, or other commands printed into the same stdout (a linter's ``f.py:97:5:`` looks alike)."""
+    no -n, or other commands printed into the same stdout (a linter's ``f.py:97:5:`` looks alike).
+
+    ``edge`` ("first"/"last"): the grep printed first or last of several commands run one after
+    another, and nothing else in the command prints bare numbered lines."""
     if not argv:
         return None
     tool, args = os.path.basename(argv[0]), argv[1:]
@@ -533,7 +536,12 @@ def _grep_evidence(argv: list[str], stdout: str, cwd: str | None, at: str | None
     single = None if tool == "git-grep" else _single_target(args, cwd, tool)
     if single and other_printers:
         # A single-file grep prints bare "N:text"; another file printed into the same stdout
-        # (a second grep, a cat) would have its lines credited to this file.
+        # (a second grep, a cat) would have its lines credited to this file. Unless the grep ran
+        # first or last: then its hits are the run of ascending "N:text" lines at that end.
+        match = _grep_matcher(args, tool) if edge else None
+        block = _edge_block(stdout, edge, match) if match else []
+        if block:
+            return from_grep_text("\n".join(block) + "\n", cwd, "Bash", at, single_file=single)
         return [Observation(single, 0, [], "Bash-touch", at, line_numbers=[])]
     obs = from_grep_text(stdout, cwd, "Bash", at, single_file=single, roots=_grep_targets(args, cwd, tool))
     if alone:
@@ -550,6 +558,32 @@ def _grep_evidence(argv: list[str], stdout: str, cwd: str | None, at: str | None
         if pairs:
             kept.append(Observation(o.path, pairs[0][0], [t for _, t in pairs], o.tool, o.at, line_numbers=[n for n, _ in pairs]))
     return kept
+
+
+def _edge_block(stdout: str, edge: str, match) -> list[str]:
+    """The run of one-file grep output at the start or end of ``stdout``: "N:hit" lines whose text
+    matches the pattern, "N-context" lines and "--" separators, numbers strictly ascending."""
+    lines = stdout.rstrip("\n").split("\n")
+    seq = lines if edge == "first" else lines[::-1]
+    block: list[str] = []
+    last: int | None = None
+    for raw in seq:
+        if raw == "--":
+            block.append(raw)
+            continue
+        b = _GREP_BARE.match(raw)
+        if not b:
+            break
+        n = int(b.group("line"))
+        if last is not None and (n <= last if edge == "first" else n >= last):
+            break
+        if raw[len(b.group("line"))] == ":" and not match(b.group("text")):
+            break
+        block.append(raw)
+        last = n
+    while block and block[-1] == "--":
+        block.pop()
+    return block if edge == "first" else block[::-1]
 
 
 def _grep_matcher(args: list[str], tool: str):
@@ -610,6 +644,14 @@ _LINE_FILTER = re.compile(
     r"(?:grep|rg)(?:\s+-(?![\w-]*[onbcABC])[\w-]+)*\s+(?:'[^']*'|\"[^\"]*\"|\S+))$"
 )
 _NUMBERED_LINE = re.compile(r"^\s*(\d+)\t(.*)$")
+# `nl -ba` and `cat -n` right-align the number in six columns, then a tab. Text from other
+# commands rarely has that exact shape; a TSV line such as "12\tfoo" does not.
+_NL_EXACT = re.compile(r"^( {5}\d| {4}\d{2}| {3}\d{3}| {2}\d{4}| \d{5}|\d{6,})\t(.*)$")
+# Commands that can print lines of any shape, numbered ones included.
+_ANY_SHAPE = re.compile(
+    r"(?:^|[|;&(]\s*)(?:\S*/)?(?:nl|awk|gawk|mawk|perl|python\d*(?:\.\d+)?|node|ruby|php|sh|bash|zsh|pr|less|bat|xargs"
+    r"|column|paste|while|for|until|do|eval|source|ssh|sudo)\b|\bcat\s+-\w*n|\$\(|`|printf\s+\S*%"
+)
 
 
 def _git_top(d: str) -> str | None:
@@ -715,8 +757,33 @@ def _self_numbered(seg: str, cwd: str | None) -> str | None:
     return os.path.normpath(path if os.path.isabs(path) or not cwd else os.path.join(cwd, path))
 
 
-def _numbered_lines(text: str) -> list[tuple[int, str]]:
-    return [(int(m.group(1)), m.group(2)) for m in map(_NUMBERED_LINE.match, text.split("\n")) if m]
+def _numbered_lines(text: str, exact: bool = False) -> list[tuple[int, str]]:
+    rx = _NL_EXACT if exact else _NUMBERED_LINE
+    return [(int(m.group(1)), m.group(2)) for m in map(rx.match, text.split("\n")) if m]
+
+
+_FOR = re.compile(r"\bfor\s+([A-Za-z_]\w*)\s+in\s+([^;\n]*?)\s*(?:;|\n)\s*do\s+(.*?)\s*(?:;|\n)?\s*done\b", re.S)
+_SAFE_WORD = re.compile(r"[\w./@:+,=-]+")
+
+
+def _unroll_for(command: str) -> str:
+    """``for f in a b; do echo "== $f"; nl -ba "$f"; done`` -> the body once per word, in order,
+    which is what the loop ran. Only plain word lists and bodies that use the variable plainly
+    (``$f``, ``${f}``) are unrolled; anything else is left as it was."""
+    def expand(m: re.Match[str]) -> str:
+        var, words, body = m.group(1), m.group(2), m.group(3)
+        try:
+            items = shlex.split(words)
+        except ValueError:
+            return m.group(0)
+        if not items or len(items) > 50 or not all(_SAFE_WORD.fullmatch(w) for w in items):
+            return m.group(0)
+        if re.search(r"\b(?:for|while|until|do|done)\b", body) or re.search(rf"\$\{{{var}[^}}]*[^\w}}]", body):
+            return m.group(0)  # nested loops, ${f%...}-style expansions
+        pat = re.compile(rf"\$\{{{var}\}}|\${var}(?!\w)")
+        return "; ".join(pat.sub(lambda _m, w=w: w, body) for w in items)
+
+    return _FOR.sub(expand, command) if "for " in command else command
 
 
 _CD_SEG = re.compile(r"""cd(?:\s+(?P<dir>'[^']*'|"[^"]*"|[^\s'"]+))?(?:\s+2>\s*/dev/null)?""")
@@ -753,6 +820,11 @@ def _segment_cwds(segments: list[str], cwd: str | None) -> list[str | None] | No
 
 def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None) -> list[Observation]:
     """Recognize simple file-printing commands whose stdout is a known file slice."""
+    sh = _SHELL_C.fullmatch(_unwrap(command.strip()))
+    if sh:
+        script = sh.group(1) if sh.group(1) is not None else sh.group(2)
+        return from_shell(_CD.sub("", script, count=1), stdout, effective_cwd(script, cwd), at)
+    command = _unroll_for(command)
     out: list[Observation] = []
     owner: dict[int, int] = {}  # index in ``out`` -> index of the segment that printed it
     segments = [_unwrap(x) for x in _split_unquoted(command, newlines=True)]
@@ -776,7 +848,22 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
             for segs, chunk in fenced or []:
                 if segs == [k]:
                     return _grep_evidence(gargv, "\n".join(chunk) + "\n", cwds[k], at, alone=True)
-        return _grep_evidence(gargv, stdout, cwds[k], at, alone=len(loud) == 1, other_printers=len(printers) > 1)
+        return _grep_evidence(gargv, stdout, cwds[k], at, alone=len(loud) == 1, other_printers=len(printers) > 1, edge=edge_of(k))
+
+    def edge_of(k: int) -> str | None:
+        """"first"/"last" when segment k printed first/last and no other segment can print
+        bare numbered lines (another grep, a self-numbered printer, a script)."""
+        order = [i for i, s in enumerate(segments) if s and not _SILENT.match(s) and not re.fullmatch(r"echo(?:\s+(?:\"\"|''))?", s)]
+        if not order or k not in (order[0], order[-1]):
+            return None
+        for i in order:
+            s = segments[i]
+            if i == k:
+                continue
+            head = (s.split() or [""])[0].rsplit("/", 1)[-1]
+            if head in ("grep", "rg", "git") and re.search(r"\bgrep\b|^rg\b", s) or i in numbered or _ANY_SHAPE.search(s) or _self_numbered(s, cwds[i]):
+                return None
+        return "first" if k == order[0] else "last"
 
     numbered: dict[int, str] = {}  # segment -> file, for self-numbered printers (nl -ba, cat -n)
     for k, seg in enumerate(segments):
@@ -898,8 +985,12 @@ def from_shell(command: str, stdout: str, cwd: str | None, at: str | None = None
 # Commands that run another command unchanged: `timeout 60 rg -n ...` is the rg.
 _WRAPPER = re.compile(
     r"^(?:(?:timeout(?:\s+-[sk]\s*\S+|\s+--\S+)*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+|\s+-\d+)?"
-    r"|command(?=\s+[^-\s])|time|stdbuf(?:\s+-[ioe]\S+)+|env(?:\s+[A-Za-z_]\w*=\S*)+)\s+)+"
+    r"|command(?=\s+[^-\s])|time|stdbuf(?:\s+-[ioe]\S+)+|env(?:\s+[A-Za-z_]\w*=\S*)+"
+    r"|(?:\S*/)?worker-lifecycle\s+run\s+(?:\S+\s+)*?--(?=\s))\s+)+"
 )
+# `bash -lc '...'` / `sh -c "..."`: the script is the command. Double quotes only when nothing in
+# them would be expanded by the outer shell.
+_SHELL_C = re.compile(r"(?:\S*/)?(?:ba|z)?sh\s+(?:-l\s+)?-l?c\s+(?:'([^']*)'|\"([^\"$`\\]*)\")\s*")
 
 
 def _unwrap(seg: str) -> str:
@@ -1036,13 +1127,21 @@ def _numbered_evidence(numbered: dict[int, str], segments: list[str], loud: list
                 if pairs:
                     res.append(obs(numbered[segs[0]], pairs))
         return res + touch
-    others = [x for x in loud if not re.match(r"(?:echo|printf)\b", x) and x not in {segments[k] for k in numbered}]
-    pairs = _numbered_lines(stdout)
-    if others or not pairs:
+    plain_echo = re.compile(r"(?:echo|printf)\b(?!.*(?:\$\(|`))")  # `echo $(nl f)` prints anything
+    others = [x for x in loud if not plain_echo.match(x) and x not in {segments[k] for k in numbered}]
+    if any(_ANY_SHAPE.search(x) for x in others):
+        return touch  # another command may print numbered lines of its own
+    # With other commands in the same stdout (a grep, a jq, a wc), only lines in the exact
+    # `nl` shape are numbered evidence; the commands run in order, so the runs stay in order.
+    pairs = _numbered_lines(stdout, exact=bool(others))
+    if not pairs:
         return touch
     if len(set(numbered.values())) == 1:
         # Several slices of ONE file: every numbered line is that file's, wherever the runs break.
         return [obs(next(iter(numbered.values())), pairs)] + touch
+    split = _split_by_ranges([(numbered[k], _slice_ranges(segments[k]), _line_count(numbered[k])) for k in sorted(numbered)], pairs)
+    if split is not None:
+        return [obs(p, prs) for p, prs in split if prs] + touch
     runs: list[list[tuple[int, str]]] = [[pairs[0]]]
     for prev, cur in zip(pairs, pairs[1:]):
         if cur[0] <= prev[0]:
@@ -1052,6 +1151,65 @@ def _numbered_evidence(numbered: dict[int, str], segments: list[str], loud: list
     if len(runs) != len(order):
         return touch  # a range that continues past the previous one hides a boundary
     return [obs(p, r) for p, r in zip(order, runs)] + touch
+
+
+def _slice_ranges(seg: str) -> list[tuple[int, float]] | None:
+    """The line ranges ``nl -ba F | sed -n 'A,Bp;C,Dp'`` / ``cat -n F | head -N`` can print, in
+    file order; None when a filter (grep, tail) makes them unknown."""
+    parts = [x.strip() for x in _split_unquoted(seg, pipes=True)][1:]
+    ranges: list[tuple[int, float]] = [(1, float("inf"))]
+    for k, part in enumerate(parts):
+        m = re.fullmatch(r"sed\s+-n\s+['\"]?(\d+(?:,\d+)?p(?:;\d+(?:,\d+)?p)*)['\"]?", part)
+        if m and k == 0:
+            ranges = []
+            for spec in m.group(1).split(";"):
+                a, _, b = spec.rstrip("p").partition(",")
+                ranges.append((int(a), float(b or a)))
+            continue
+        if re.fullmatch(r"head(?:\s+-n)?(?:\s+-?\d+)?", part):
+            continue  # a prefix of what came before: the output may just stop early
+        return None
+    ranges.sort()
+    merged: list[tuple[int, float]] = []
+    for a, b in ranges:
+        if merged and a <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return merged
+
+
+def _split_by_ranges(order: list[tuple[str, list[tuple[int, float]] | None, int | None]], pairs: list[tuple[int, str]]) -> list[tuple[str, list[tuple[int, str]]]] | None:
+    """Split numbered lines among slices printed one after another, using what each slice can
+    print: it starts at its first range, runs on line by line, and jumps only from the end of
+    one range to the start of the next. Any line that fits nowhere: None (no split)."""
+    out: list[tuple[str, list[tuple[int, str]]]] = []
+    i = 0
+    for path, ranges, length in order:
+        if ranges is None:
+            return None
+        if length is not None:
+            ranges = [(a, min(b, length)) for a, b in ranges if a <= length]
+        got: list[tuple[int, str]] = []
+        j = 0
+        while i < len(pairs) and ranges:
+            n = pairs[i][0]
+            if not got:
+                ok = n == ranges[0][0]
+            elif n == got[-1][0] + 1 and n <= ranges[j][1]:
+                ok = True
+            elif got[-1][0] == ranges[j][1] and j + 1 < len(ranges) and n == ranges[j + 1][0]:
+                j, ok = j + 1, True
+            else:
+                ok = False
+            if not ok:
+                break
+            got.append(pairs[i])
+            i += 1
+        if not got and ranges:
+            return None  # should have printed something: the lines went to the wrong slice
+        out.append((path, got))
+    return out if i == len(pairs) else None
 
 
 def _echo_chunks(segments: list[str], stdout: str) -> list[tuple[list[int], list[str]]] | None:
