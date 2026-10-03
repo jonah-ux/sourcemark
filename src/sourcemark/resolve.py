@@ -45,6 +45,19 @@ MAX_SEARCH_FILES = 50
 FUZZY_SEARCH_FILES = 5
 IN_PLACE_CONTEXT = 0.8
 
+# Resolution quality is considered first. When two candidates are equally strong, prefer the
+# method that carries the most direct provenance and finally the normalized path. The final path
+# tie-break keeps duplicate copies stable across filesystem traversal and `rg` output order.
+_METHOD_PRIORITY = {
+    "position": 0,
+    "history": 1,
+    "redacted-hash": 1,
+    "exact": 2,
+    "loose": 3,
+    "history-edit": 3,
+    "fuzzy": 4,
+}
+
 
 @dataclass
 class Resolution:
@@ -290,6 +303,25 @@ def _verify_redacted(mark: Mark, path: str, doc: str, old: str | None = None) ->
     return None
 
 
+def _normalized_path(path: str | None) -> str:
+    """Return a stable path key for equal-quality candidate resolution."""
+
+    if not path:
+        return ""
+    return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+
+
+def _resolution_key(result: Resolution) -> tuple[float, float, int, str]:
+    """Sort equal candidates by quality, provenance method, then normalized path."""
+
+    return (
+        -result.similarity,
+        -result.context_score,
+        _METHOD_PRIORITY.get(result.method, 99),
+        _normalized_path(result.path),
+    )
+
+
 def resolve(
     mark: Mark,
     roots: Iterable[str] = (),
@@ -377,15 +409,16 @@ def resolve(
 
     def pick_best(cands: list[str], allow_fuzzy: bool, unique: bool, strict: bool = False) -> bool:
         """Try every candidate and keep the one whose surroundings agree most, not the first
-        hit: an identical decoy elsewhere must not win over the real moved file."""
+        hit: an identical decoy elsewhere must not win over the real moved file. Equal candidates
+        use method provenance and normalized path as deterministic tie-breaks."""
         nonlocal res
-        best_r: Resolution | None = None
-        for c in cands:
+        candidates: list[Resolution] = []
+        for c in sorted(set(cands), key=_normalized_path):
             if attempt(c, allow_fuzzy=allow_fuzzy, searched=True, unique=unique, strict=strict):
-                if best_r is None or (res.similarity, res.context_score) > (best_r.similarity, best_r.context_score):
-                    best_r = Resolution(**res.to_dict())
-        if best_r is None:
+                candidates.append(Resolution(**res.to_dict()))
+        if not candidates:
             return False
+        best_r = min(candidates, key=_resolution_key)
         best_r.candidates_checked, best_r.notes = res.candidates_checked, res.notes
         res = best_r
         return True
@@ -401,14 +434,20 @@ def resolve(
     best = Resolution(**res.to_dict()) if res.path else None
 
     if repo_root and src.get("git_commit") and src.get("repo_path"):
-        for rel in git_renames(repo_root, src["git_commit"], src["repo_path"]):
+        rename_paths = sorted(
+            set(git_renames(repo_root, src["git_commit"], src["repo_path"])),
+            key=lambda rel: _normalized_path(os.path.join(repo_root, rel)),
+        )
+        for rel in rename_paths:
             cand = os.path.join(repo_root, rel)
             if cand in seen:
                 continue
             seen.add(cand)
             res.notes.append(f"git rename -> {rel}")
-            if attempt(cand) and (best is None or res.similarity > best.similarity):
-                best = Resolution(**res.to_dict())
+            if attempt(cand):
+                candidate = Resolution(**res.to_dict())
+                if best is None or _resolution_key(candidate) < _resolution_key(best):
+                    best = candidate
             if best is not None and best.similarity >= 0.999:
                 break
     if best is not None and best.similarity >= 0.999:
