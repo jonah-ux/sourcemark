@@ -51,21 +51,10 @@
       color: var(--ink); background: var(--panel-2); font: 700 12px var(--mono); letter-spacing: .04em;
     }
     button:hover, button:focus-visible { border-color: var(--cyan); color: var(--cyan); outline: 2px solid #6fe7db33; outline-offset: 2px; }
-    .hero-grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: 18px; margin: 30px 0 18px; }
     .card { border: 1px solid var(--line); border-radius: 18px; background: #0e1a2aee; box-shadow: 0 20px 60px #0003; }
     .card-inner { padding: 24px; }
     .card h2 { margin: 0 0 8px; font-size: 1.2rem; }
     .card p { margin: 0; color: var(--muted); }
-    .flow { display: grid; gap: 11px; margin-top: 22px; }
-    .flow-step { display: grid; grid-template-columns: 33px 1fr auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid #294157; border-radius: 12px; background: #122237; }
-    .step-no { display: grid; place-items: center; width: 27px; height: 27px; border-radius: 50%; color: var(--bg); background: var(--cyan); font: 800 12px var(--mono); }
-    .flow-step strong { display: block; font-size: .95rem; }
-    .flow-step span { color: var(--muted); font-size: .83rem; }
-    .pill { border-radius: 999px; padding: 4px 8px; color: var(--cyan); background: #6fe7db16; font: 700 10px var(--mono); letter-spacing: .08em; }
-    .lighthouse { position: relative; min-height: 100%; overflow: hidden; }
-    .lighthouse svg { display: block; width: 100%; height: 100%; min-height: 290px; }
-    .beam { transform-origin: 50% 50%; animation: sweep 7s ease-in-out infinite alternate; }
-    @keyframes sweep { from { transform: rotate(-12deg); opacity: .25; } to { transform: rotate(10deg); opacity: .65; } }
     .section-label { margin: 50px 0 14px; color: var(--yellow); font: 700 12px var(--mono); letter-spacing: .16em; text-transform: uppercase; }
     .timeline { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin-top: 20px; }
     .timeline-step { position: relative; padding: 18px 17px 14px; border-top: 2px solid var(--line); }
@@ -89,6 +78,7 @@
     .controls button.primary { color: var(--bg); border-color: var(--cyan); background: var(--cyan); }
     .controls button.primary:hover, .controls button.primary:focus-visible { color: var(--bg); background: #a0f3eb; }
     .proof-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .proof-grid.one-proof { grid-template-columns: 1fr; }
     .proof { padding: 18px; border-left: 3px solid var(--cyan); background: #101d2d; }
     .proof b { display: block; margin-bottom: 6px; }
     .proof p { margin: 0; color: var(--muted); font-size: .9rem; }
@@ -97,15 +87,13 @@
     @media (max-width: 760px) {
       .wrap { width: min(100% - 24px, 620px); }
       header { padding-top: 42px; }
-      .install, .hero-grid, .scenario { display: block; }
+      .install, .scenario { display: block; }
       .install button { margin-top: 12px; }
-      .lighthouse { margin-top: 18px; }
       .timeline, .proof-grid { grid-template-columns: 1fr; }
       .timeline-step { border-top: 0; border-left: 2px solid var(--line); padding: 12px 17px 18px 22px; }
       .timeline-step::before { top: 15px; left: -7px; }
       .timeline-step.active { border-color: var(--cyan); }
     }
-    @media (prefers-reduced-motion: reduce) { .beam { animation: none; } }
 
     .cohort-deck { position: relative; overflow: hidden; margin: 12px 0 30px; padding: 22px; border: 1px solid color-mix(in srgb, var(--deck-accent, var(--cyan, #72dcff)) 42%, var(--line, #263447)); border-radius: 22px; background: linear-gradient(135deg, color-mix(in srgb, var(--deck-accent, var(--cyan, #72dcff)) 10%, transparent), color-mix(in srgb, var(--panel, #101b2a) 94%, #000)); box-shadow: 0 24px 70px #0004; }
     .cohort-deck::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: radial-gradient(circle at 88% 16%, color-mix(in srgb, var(--deck-accent, var(--cyan, #72dcff)) 22%, transparent), transparent 25%); opacity: .75; }
@@ -178,30 +166,6 @@
     </section>
 
 
-    <section class="hero-grid" aria-label="What happens">
-      <article class="card"><div class="card-inner">
-        <h2>A tiny tool for a very modern problem.</h2>
-        <p>Answers outlive the file layout they were born in. Sourcemark stores enough context to find the evidence again, and enough session detail to catch a citation the agent never actually read.</p>
-        <div class="flow">
-          <div class="flow-step"><span class="step-no">1</span><div><strong>Anchor the evidence</strong><span>one command, one short token</span></div><span class="pill">MARK</span></div>
-          <div class="flow-step"><span class="step-no">2</span><div><strong>Let the repo change</strong><span>rename, insert, edit, repeat</span></div><span class="pill">MOVE</span></div>
-          <div class="flow-step"><span class="step-no">3</span><div><strong>Resolve the truth</strong><span>intact · shifted · moved · edited</span></div><span class="pill">PROVE</span></div>
-        </div>
-      </div></article>
-      <article class="card lighthouse" aria-label="Lighthouse illustration">
-        <svg viewBox="0 0 560 320" role="img" aria-label="A lighthouse shining a beam over a changing document">
-          <defs><linearGradient id="sky" x1="0" x2="0" y1="0" y2="1"><stop stop-color="#1a3855"/><stop offset="1" stop-color="#0b1727"/></linearGradient><linearGradient id="beam" x1="0" x2="1"><stop stop-color="#ffd166" stop-opacity="0"/><stop offset=".7" stop-color="#ffd166" stop-opacity=".38"/><stop offset="1" stop-color="#ffd166" stop-opacity="0"/></linearGradient></defs>
-          <rect width="560" height="320" fill="url(#sky)"/><circle cx="463" cy="58" r="25" fill="#ffd166" opacity=".9"/>
-          <g class="beam"><path d="M333 102 L560 44 L560 123 Z" fill="url(#beam)"/></g>
-          <path d="M0 264 Q110 220 230 267 T560 246 V320 H0Z" fill="#07101b"/>
-          <path d="M266 266 L294 136 H337 L366 266 Z" fill="#e6edf4"/><path d="M283 154 H350 L342 119 H291Z" fill="#ff8fb3"/>
-          <rect x="284" y="104" width="66" height="15" rx="4" fill="#6fe7db"/><rect x="300" y="72" width="34" height="33" fill="#1d3349" stroke="#6fe7db" stroke-width="4"/><path d="M294 72 H340" stroke="#edf2f7" stroke-width="6"/>
-          <path d="M306 167 V206 M328 167 V206 M302 206 H332" stroke="#0b1727" stroke-width="5"/>
-          <text x="25" y="44" fill="#edf2f7" font-family="monospace" font-size="13" letter-spacing="2">EVIDENCE HARBOR / 01</text>
-        </svg>
-      </article>
-    </section>
-
     <div class="section-label">01 / Watch the mark survive</div>
     <section class="card"><div class="card-inner">
       <div class="timeline" aria-label="Citation lifecycle">
@@ -215,7 +179,7 @@
     <div class="section-label">02 / Run the synthetic incident</div>
     <section class="scenario">
       <div class="terminal" aria-label="Command transcript">
-        <div class="dim">$ python3 demos/demo.py</div>
+        <div class="dim">$ python3 demos/demo.py --installed</div>
         <div>1. cited <span class="good">[sm:7f3a9c2b1d]</span> docs/lighthouse.md:4-5</div>
         <div>2. renamed to ops/harbor-lighthouse.md</div>
         <div>   added 2 lines above, edited a word inside</div>
@@ -224,13 +188,12 @@
         <div>   <span class="good">verified</span>   lighthouse.md:6</div>
         <div>   <span class="bad">unread_lines</span> roster.md:3</div>
         <div>   <span class="bad">url_unsourced</span> made-up-spec</div>
-        <div class="dim" id="terminal-tail">-- one real citation, two useful refusals</div>
+        <div class="dim" id="terminal-tail">-- verified read, unread lines and unsourced URL refused</div>
       </div>
       <div class="result" aria-live="polite">
         <div class="eyebrow">Sourcemark verdict</div>
         <div class="state" id="state">edited</div>
-        <p id="result-copy">The file moved and the sentence changed, but the evidence was found again. That is the useful kind of drama.</p>
-        <p><strong>One install.</strong> No service, account, sibling repo, or cloud round-trip required.</p>
+        <p id="result-copy">The source was found again after a rename and wording change.</p>
         <div class="controls">
           <button class="primary" id="rerun" type="button">run walkthrough</button>
           <button id="copy-command" type="button" data-copy="python3 demos/demo.py">copy demo command</button>
@@ -238,16 +201,11 @@
       </div>
     </section>
 
-    <div class="section-label">03 / Why teams keep it around</div>
-    <section class="proof-grid">
-      <article class="proof"><b>Survives ordinary churn</b><p>Git renames, inserted lines, edited wording, and untracked moves are part of the synthetic path.</p></article>
-      <article class="proof"><b>Catches confident nonsense</b><p>Unread lines, made-up files, and unsourced links are visible failures instead of polished fiction.</p></article>
-      <article class="proof"><b>Stays local and inspectable</b><p>Python 3.11+, standard library only, SQLite ledger, MIT license. The fixture is synthetic by design.</p></article>
-    </section>
+    <div class="section-label">03 / Local runtime</div>
+    <section class="proof-grid one-proof"><article class="proof"><b>Local and inspectable</b><p>Python 3.11+ · standard library · SQLite ledger · synthetic fixtures.</p></article></section>
 
     <footer>
-      <p>To reproduce the illustrated incident, first clone the tagged source: <code>git clone --branch v0.5.1 --depth 1 https://github.com/jonah-ux/sourcemark.git</code>, then <code>cd sourcemark</code>. The demo file is included in that checkout; it is not a CLI subcommand.</p>
-      <p>Want the source? Open <a href="https://github.com/jonah-ux/sourcemark#readme">README.md</a> or run <code>python3 demos/demo.py</code> from a checkout. The walkthrough is intentionally self-contained so it can be read before installing anything.</p>
+      <p><a href="https://github.com/jonah-ux/sourcemark#readme">README and full CLI reference</a> · <a href="https://github.com/jonah-ux/sourcemark/releases">Tagged releases</a></p>
     </footer>
   </main>
   <script>
