@@ -17,6 +17,12 @@
     became, not against the inserted lines too.
   - History bench (2,591 real cases): `edited_similar` 90.0% → 92.0%, every other category the
     same. Stored failures: 67 → 70 fully correct, 88 → 91 right status, none newly failing.
+- Links:
+  - A URL passed to a fetcher that ran and printed something (`curl`, `wget`, `yt-dlp`, `xh`,
+    httpie) is sourced, though the output need not repeat it. `echo` still is not, nor is a
+    command with a `||` fallback.
+  - Google Docs/Drive `usp=` and YouTube `si=` share parameters no longer make a link a
+    different page (`…/edit?usp=drivesdk` from the API, `…/edit` in the answer).
 
 ## 0.5.1 — 2026-10-03
 
