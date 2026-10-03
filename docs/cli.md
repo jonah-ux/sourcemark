@@ -27,7 +27,7 @@ Exit 0 for `intact`/`shifted`/`moved`, 1 otherwise.
 
 Print a stored mark (quote text, or `[redacted]` / `[fingerprint only]`).
 
-## `sourcemark check TRANSCRIPT [--all] [--now] [--text FILE]`
+## `sourcemark check TRANSCRIPT [--all] [--now] [--text FILE] [--export v1]`
 
 Check citations against what a Claude Code session or a Codex rollout read and wrote (the format
 is detected; see the README's Codex section for how Codex cells are read). By default checks the last
@@ -35,6 +35,15 @@ turn (all assistant text since the latest human prompt). `--all` checks every as
 `--now` also reports whether cited lines changed since they were read; `--text` checks the text
 in FILE against the session instead of the transcript's own reply. Exit 1 when any citation is
 unsupported (`delegated` is reported but is not a failure).
+
+### `--export v1`
+
+The explicit export flag emits one sanitized `sourcemark/check/v1` JSON envelope, even without
+`--json`. Its fields are `schema`, a bounded `state` (`ok`, `observed`, `partial`, or
+`timed_out`), fixed scalar counts (`total`, `passing`, `failing`, `unknown`, `observations`, and
+`timed_out`), and SHA-256 policy/session identities. It omits paths, quotes, transcript text,
+URLs, raw mark tokens, and ledger contents. Malformed JSONL is refused with exit 2 and no export.
+The ordinary `check --json` output remains the detailed local report.
 
 ## `sourcemark verify-ledger`
 

@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from sourcemark.anchor import mark_lines  # noqa: E402
 from sourcemark.check import check_text  # noqa: E402
+from sourcemark.check_export import export_check_v1  # noqa: E402
 from sourcemark.gitinfo import source_for  # noqa: E402
 from sourcemark.observe import Observation, Session  # noqa: E402
 from sourcemark.resolve import resolve  # noqa: E402
@@ -86,11 +87,19 @@ def main() -> int:
         for c in rep.checks:
             print(f"   {c.verdict:15} {c.raw}")
 
+        export = export_check_v1(rep, sess)
+        print(f"5. sanitized check export -> {export['schema']} ({export['state']})")
+
         verdict = {
             "resolve": res.status,
             "moved": res.moved,
             "line": res.line_start,
             "citations": rep.counts(),
+            "check_export": {
+                "schema": export["schema"],
+                "state": export["state"],
+                "counts": export["counts"],
+            },
             "ok": res.status == "edited" and res.moved and rep.counts().get("verified") == 1,
         }
         print(json.dumps(verdict, sort_keys=True))
