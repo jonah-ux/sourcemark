@@ -6,8 +6,8 @@
   Reject malformed, non-object, invalid UTF-8, or unreadable delegated evidence without an
   export, while preserving the ordinary transcript readers' handling of incomplete logs.
 - Capture the root export input in a private temporary snapshot so an in-place rewrite
-  cannot change the format decision or omit citations. Large-input spill is bounded and
-  cleaned on success or failure.
+  cannot change the format decision or omit citations. In-memory buffering uses a 1 MiB
+  threshold; temporary files may hold the full transcript and are cleaned on success or failure.
 
 - Add the explicit `check --export v1` boundary projection for sanitized citation/read-evidence
   results. The versioned envelope carries only bounded state, fixed scalar counts, and hashed
