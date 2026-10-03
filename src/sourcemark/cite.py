@@ -199,8 +199,10 @@ def _attach_quotes(text: str, cites: list[Citation], window: int) -> None:
             rest = q
             for c in inner:
                 rest = rest[: c.start - m.start(1)] + rest[c.end - m.start(1) :]
-            if not re.sub(r"[\s\[\]()]", "", rest):
-                continue  # `[a.py:3](/abs/a.py:3)`: a link written as code, still only a citation
+            # `[a.py:3](/abs/a.py:3)`: a link written as code; `a.ts:282,411`: more line numbers
+            # for the same file. Still only citations.
+            if not re.sub(r"[\s\[\]()]|,\s*\d+(?:[-–]\d+)?", "", rest):
+                continue
         best: Citation | None = None
         best_d = window + 1
         for c in path_cites:
