@@ -46,14 +46,14 @@ jobs:
           .release-wheel/bin/python -m pip install dist/*.whl
           .release-wheel/bin/sourcemark --version
           .release-wheel/bin/sourcemark --help
-          .release-wheel/bin/python demos/demo.py
+          env -u PYTHONPATH .release-wheel/bin/python demos/demo.py --installed
       - name: Verify source consumer
         run: |
           python -m venv .release-sdist
           .release-sdist/bin/python -m pip install dist/*.tar.gz
           .release-sdist/bin/sourcemark --version
           .release-sdist/bin/sourcemark --help
-          .release-sdist/bin/python demos/demo.py
+          env -u PYTHONPATH .release-sdist/bin/python demos/demo.py --installed
       - name: Publish prerelease assets
         env:
           GH_TOKEN: ${{ github.token }}

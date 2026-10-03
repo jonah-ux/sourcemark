@@ -12,6 +12,7 @@ Prints a one-line JSON verdict at the end.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -19,7 +20,14 @@ import subprocess
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument(
+    "--installed", action="store_true",
+    help="exercise the installed package without adding the checkout's src directory",
+)
+args = parser.parse_args()
+if not args.installed:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 from sourcemark.anchor import mark_lines  # noqa: E402
 from sourcemark.check import check_text  # noqa: E402
