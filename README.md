@@ -13,9 +13,17 @@ Python 3.11+ · Zero runtime dependencies · MIT · Local only · Early release
 
 ```console
 python3 -m venv .venv && . .venv/bin/activate
-python3 -m pip install 'git+https://github.com/jonah-ux/sourcemark.git@v0.5.1'
+python3 -m pip install 'git+https://github.com/jonah-ux/sourcemark.git@v0.5.0'
 sourcemark --version
 python3 demos/demo.py        # 30-second synthetic walkthrough (from a checkout)
+```
+
+The published stable release is **0.5.0**. The **0.5.1** patch is on `main` and has
+passed CI, but its versioned release is pending. To try the export-parser repair
+and installed-package demo mode from their reviewed source commit:
+
+```console
+python3 -m pip install 'git+https://github.com/jonah-ux/sourcemark.git@500e25f903ca386f4a564beb88dae48054a0aa35'
 ```
 
 Before installing, open the [synthetic walkthrough](docs/walkthrough.html) for a visual tour of
@@ -33,7 +41,7 @@ That command creates and removes its own temporary git repository, prints each s
 non-zero if the moved/edited citation or the deliberate checker refusals do not appear.
 
 Each [release](https://github.com/jonah-ux/sourcemark/releases) also ships a wheel, an sdist and
-`SHA256SUMS`; `pip install sourcemark-0.5.1-py3-none-any.whl` after checking the hash. Python 3.11+,
+`SHA256SUMS`; `pip install sourcemark-0.5.0-py3-none-any.whl` after checking the hash. Python 3.11+,
 no dependencies.
 
 ## Usage
