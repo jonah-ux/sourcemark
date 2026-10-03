@@ -1188,7 +1188,11 @@ def _numbered_evidence(numbered: dict[int, str], segments: list[str], loud: list
     if len(set(numbered.values())) == 1:
         # Several slices of ONE file: every numbered line is that file's, wherever the runs break.
         return [obs(next(iter(numbered.values())), pairs)] + touch
-    split = _split_by_ranges([(numbered[k], _slice_ranges(segments[k]), _line_count(numbered[k])) for k in sorted(numbered)], pairs)
+    order = [(numbered[k], _slice_ranges(segments[k]), _line_count(numbered[k])) for k in sorted(numbered)]
+    split = _split_by_ranges(order, pairs)
+    if split is None and any(length is not None for _, _, length in order):
+        # The files may have changed since the session: their lengths now say nothing about then.
+        split = _split_by_ranges([(path, ranges, None) for path, ranges, _ in order], pairs)
     if split is not None:
         return [obs(p, prs) for p, prs in split if prs] + touch
     runs: list[list[tuple[int, str]]] = [[pairs[0]]]
@@ -1527,7 +1531,7 @@ def _text_of(content: Any) -> str:
 # command's stdout. Only cells that call exec_command once, with literal arguments, and print its
 # output unchanged, are read as "this command printed this"; any other cell still sources URLs.
 
-_JS_LIT = r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|`(?:[^`\\$]|\\.)*`"
+_JS_LIT = r"\"(?:[^\"\\]|\\[\s\S])*\"|'(?:[^'\\]|\\[\s\S])*'|`(?:[^`\\$]|\\[\s\S])*`"  # `\` + newline continues a line
 _JS_PAIR = re.compile(rf"\s*(?:\"(\w+)\"|'(\w+)'|(\w+))\s*:\s*({_JS_LIT}|-?\d+(?:\.\d+)?|true|false|null)\s*,?")
 _JS_CALL = re.compile(r"tools\.exec_command\(\s*\{(?P<obj>(?:[^{}`\"']|" + _JS_LIT + r")*)\}\s*\)", re.S)
 _CELL_FORMS = {
@@ -1730,7 +1734,7 @@ _JS_MAP = re.compile(
     r"\b(\w+)\.map\(\s*(?:async\s*)?(?:\(\s*\[([^\]]*)\]\s*(?:,\s*\w+\s*)?\)|\(\s*(\w+)\s*(?:,\s*\w+\s*)?\)|(\w+))\s*=>"
 )
 # A JS string literal, including templates with simple ``${...}`` substitutions.
-_JS_STR = r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|`(?:[^`\\$]|\\.|\$(?!\{)|\$\{[^{}`]*\})*`"
+_JS_STR = r"\"(?:[^\"\\]|\\[\s\S])*\"|'(?:[^'\\]|\\[\s\S])*'|`(?:[^`\\$]|\\[\s\S]|\$(?!\{)|\$\{[^{}`]*\})*`"
 _JS_CALL_TPL = re.compile(r"tools\.exec_command\(\s*\{(?P<obj>(?:[^{}`\"']|" + _JS_STR + r")*)\}\s*\)", re.S)
 _JS_ARG = re.compile(r"\s*(?:(?:\"(\w+)\"|'(\w+)'|(\w+))\s*:\s*(" + _JS_STR + r"|-?\d+(?:\.\d+)?|[A-Za-z_][\w.]*)|(\w+))\s*,?", re.S)
 _JS_SUB = re.compile(r"\$\{\s*(?:JSON\.stringify\(\s*(\w+)\s*\)|(\w+))\s*\}")
@@ -1905,21 +1909,59 @@ _JS_PRINT_OUTPUT = re.compile(
 )
 
 
+_JS_TEXT_TPL = re.compile(r"text\(\s*`((?:[^`\\]|\\[\s\S]|\$\{[^{}]*\})*)`\s*\)")
+_JS_OUTPUT_REF = re.compile(r"\$\{\s*[\w.\[\]]+\.output\s*\}")
+
+
+def _frame_chunks(code: str, text: str, n: int) -> list[str] | None:
+    """Split output printed by a loop like ``text(r.output); text(`--- exit=${r.exit_code} ---`)``.
+    Each literal line of the print templates becomes a pattern (``${...}`` matches anything); a
+    pattern that matches exactly one line per command, and frames the output before or after it,
+    splits the output. Only one print loop, and no other printing, may be in the cell."""
+    loop = re.search(r"\bfor\s*\(\s*(?:const|let|var)\s+[\w\[\], ]+\s+of\b|\.forEach\(", code)
+    if not loop or code.count("text(", 0, loop.start()) or n < 2:
+        return None
+    out_at = code.find(".output", loop.start())
+    if out_at < 0:
+        return None
+    lines = text.split("\n")
+    for m in _JS_TEXT_TPL.finditer(code, loop.start()):
+        body = m.group(1)
+        parts = _JS_OUTPUT_REF.split(body)
+        if len(parts) > 2:
+            continue
+        if len(parts) == 2:
+            pieces = [(parts[0], "before"), (parts[1], "after")]
+        else:
+            pieces = [(body, "before" if m.start() < out_at else "after")]
+        for piece, side in pieces:
+            decoded = _js_string("`" + re.sub(r"\$\{[^{}]*\}", "\x00", piece) + "`")
+            for frame in (decoded or "").split("\n"):
+                literal = frame.replace("\x00", "")
+                if len(literal.strip()) < 3:
+                    continue
+                rx = re.compile("".join(".*?" if ch == "\x00" else re.escape(ch) for ch in frame))
+                hits = [i for i, x in enumerate(lines) if rx.fullmatch(x)]
+                if len(hits) != n:
+                    continue
+                if side == "before":
+                    return ["\n".join(lines[a + 1 : b]) for a, b in zip(hits, [*hits[1:], len(lines)])]
+                return ["\n".join(lines[a:b]) for a, b in zip([0, *[h + 1 for h in hits[:-1]]], hits)]
+    return None
+
+
 def _concatenated_evidence(code: str, items: list[dict[str, Any]], text: str, cwd: str | None, at: str | None) -> list[Observation] | None:
     """A cell that prints each output and nothing else, in the order the commands were listed:
     its output is what ``cmd1; cmd2; ...`` would have printed, so read it as that command."""
     prints = _JS_PRINT_OUTPUT.findall(code)
     if len(prints) != 1 or code.count("text(") != 1:
         return None
-    dirs = {it["workdir"] for it in items}
-    if len(dirs) != 1:
+    dirs = [os.path.join(cwd, it["workdir"]) if it["workdir"] and cwd and not os.path.isabs(it["workdir"]) else (it["workdir"] or cwd) for it in items]
+    if not all(d and os.path.isabs(d) for d in dirs):
         return None
-    wd = next(iter(dirs))
-    ecwd = os.path.join(cwd, wd) if wd and cwd and not os.path.isabs(wd) else (wd or cwd)
-    cmds = [expand_assignments(it["cmd"]) for it in items]
-    if any(re.match(r"\s*cd\b", c) for c in cmds):
-        return None  # each call starts in the same directory; a joined command would not
-    return [o for o in from_shell("\n".join(cmds), text, ecwd, at) if o.line_numbers or o.tool != "Bash"]
+    # Each call starts in its own directory: say so, so the joined command resolves each one there.
+    joined = "\n".join(f"cd {shlex.quote(d)}\n{expand_assignments(it['cmd'])}" for d, it in zip(dirs, items))
+    return [o for o in from_shell(joined, text, dirs[0], at) if o.line_numbers or o.tool != "Bash"]
 
 
 def _cell_batch_evidence(code: str, text: str, cwd: str | None, at: str | None, cut: bool) -> list[Observation] | None:
@@ -1945,6 +1987,8 @@ def _cell_batch_evidence(code: str, text: str, cwd: str | None, at: str | None, 
         chunks = [None if r is None or r.get("exit_code") else r["output"] for r in picked]
     else:
         found = _header_chunks(items, text, code)
+        if found is None:
+            found = _frame_chunks(code, text, len(items))
         if found is None:
             return _concatenated_evidence(code, items, text, cwd, at)
         chunks = list(found)
