@@ -115,8 +115,8 @@
       <h1>The citation that refuses to die.</h1>
       <p class="lede"><strong>Move the file. Edit the sentence. Test the agent.</strong> Sourcemark keeps the trail from a claim back to the evidence, then tells you when that trail drifts.</p>
       <div class="install" aria-label="Install Sourcemark">
-        <code>python3 -m pip install sourcemark</code>
-        <button type="button" data-copy="python3 -m pip install sourcemark">copy install</button>
+        <code>python3 -m pip install 'git+https://github.com/jonah-ux/sourcemark.git@v0.4.0'</code>
+        <button type="button" data-copy="python3 -m pip install &apos;git+https://github.com/jonah-ux/sourcemark.git@v0.4.0&apos;">copy install</button>
       </div>
     </header>
 
@@ -188,7 +188,8 @@
     </section>
 
     <footer>
-      <p>Want the source? Open <a href="../README.md">README.md</a> or run <code>python3 demos/demo.py</code> from a checkout. The walkthrough is intentionally self-contained so it can be read before installing anything.</p>
+      <p>To reproduce the illustrated incident, first clone the tagged source: <code>git clone --branch v0.4.0 --depth 1 https://github.com/jonah-ux/sourcemark.git</code>, then <code>cd sourcemark</code>. The demo file is included in that checkout; it is not a CLI subcommand.</p>
+      <p>Want the source? Open <a href="https://github.com/jonah-ux/sourcemark#readme">README.md</a> or run <code>python3 demos/demo.py</code> from a checkout. The walkthrough is intentionally self-contained so it can be read before installing anything.</p>
     </footer>
   </main>
   <script>
