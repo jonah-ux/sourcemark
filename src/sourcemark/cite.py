@@ -20,7 +20,8 @@ _EXT = r"[A-Za-z][A-Za-z0-9]{0,7}"  # an extension starts with a letter: "3.12" 
 # Directory names may carry framework route syntax: app/(admin)/users/[id]/page.tsx
 _SEG = r"(?:[\w.@+\-]|\[[\w.\-]+\]|\([\w.\-]+\))+"
 # The file is name.ext, or a dotfile (.gitignore, .env, .zshrc) that has no other extension.
-_PATH = rf"(?:~?/|\.{{1,2}}/)?(?:{_SEG}/)*(?:[\w.@+\-]+\.{_EXT}|\.[A-Za-z][\w\-]{{1,30}})"
+# ...plus a timestamped backup suffix: config.yaml.bak-20260902-154450, app.py-2026-01-01.
+_PATH = rf"(?:~?/|\.{{1,2}}/)?(?:{_SEG}/)*(?:[\w.@+\-]+\.{_EXT}(?:-\d[\w\-]*)?|\.[A-Za-z][\w\-]{{1,30}})"
 _LINES = r"(?P<l1>\d{1,6})(?:\s*[-–]\s*L?(?P<l2>\d{1,6}))?"
 
 _MD_LINK = re.compile(rf"\[(?P<label>[^\]\n]{{0,200}})\]\((?P<path>{_PATH})(?:#L{_LINES})?\)")
