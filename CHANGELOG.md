@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 0.5.1
+## 0.5.1 — 2026-10-03
 
 - Verify CI/release demos against the installed package with `--installed`, without the
   source-checkout import fallback.
@@ -10,6 +10,10 @@
 - Capture the root export input in a private temporary snapshot so an in-place rewrite
   cannot change the format decision or omit citations. In-memory buffering uses a 1 MiB
   threshold; temporary files may hold the full transcript and are cleaned on success or failure.
+- Include the HTML walkthrough in source archives and make the quickstart clone the tagged
+  source before invoking its demo.
+- Require annotated release identity, source tests, installed export regressions, and exact
+  demo-result assertions before publication.
 
 ## 0.5.0 — 2026-10-02
 

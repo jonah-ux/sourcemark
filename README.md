@@ -12,18 +12,19 @@ Python 3.11+ · Zero runtime dependencies · MIT · Local only · Early release
 ## Install
 
 ```console
+git clone --branch v0.5.1 --depth 1 https://github.com/jonah-ux/sourcemark.git
+cd sourcemark
 python3 -m venv .venv && . .venv/bin/activate
-python3 -m pip install 'git+https://github.com/jonah-ux/sourcemark.git@v0.5.0'
+python3 -m pip install .
 sourcemark --version
-python3 demos/demo.py        # 30-second synthetic walkthrough (from a checkout)
+python3 demos/demo.py --installed  # 30-second synthetic walkthrough
 ```
 
-The published stable release is **0.5.0**. The **0.5.1** patch is on `main` and has
-passed CI, but its versioned release is pending. To try the export-parser repair
-and installed-package demo mode from their reviewed source commit:
+The **0.5.1** patch binds check exports to a private transcript snapshot and refuses malformed
+evidence without exporting it. For CLI-only installation without a checkout:
 
 ```console
-python3 -m pip install 'git+https://github.com/jonah-ux/sourcemark.git@500e25f903ca386f4a564beb88dae48054a0aa35'
+python3 -m pip install 'git+https://github.com/jonah-ux/sourcemark.git@v0.5.1'
 ```
 
 Before installing, open the [synthetic walkthrough](docs/walkthrough.html) for a visual tour of
@@ -34,14 +35,14 @@ dependency-free HTML file, so it does not require another Jonah-UX repository or
 From that checkout, the shortest useful first run after installing is still:
 
 ```console
-python3 demos/demo.py
+python3 demos/demo.py --installed
 ```
 
 That command creates and removes its own temporary git repository, prints each step, and exits
 non-zero if the moved/edited citation or the deliberate checker refusals do not appear.
 
 Each [release](https://github.com/jonah-ux/sourcemark/releases) also ships a wheel, an sdist and
-`SHA256SUMS`; `pip install sourcemark-0.5.0-py3-none-any.whl` after checking the hash. Python 3.11+,
+`SHA256SUMS`; `pip install sourcemark-0.5.1-py3-none-any.whl` after checking the hash. Python 3.11+,
 no dependencies.
 
 ## Usage

@@ -14,7 +14,15 @@ distribution, and a `SHA256SUMS` file attached to the GitHub release.
 5. Tag the reviewed commit: `git tag -a vX.Y.Z -m 'Sourcemark X.Y.Z'` and push the tag.
 6. The `release` workflow verifies the tag matches the package version, builds, checksums, installs
    both artifacts in clean environments, runs the installed-package demo, and publishes the release.
+   It also requires an annotated tag identifying the checked-out commit, runs the source suite,
+   checks each consumer's installed package/version identity outside the checkout, and runs the
+   export regression suite and exact demo-result assertions before publication. Manual dispatch
+   checks out the requested tag, rather than building an unrelated default-branch commit.
 7. Download an artifact from the published release, verify it against `SHA256SUMS`, install it in a
    fresh environment, and run the CLI. A local build is not proof that the published release works.
 
 No PyPI publication is implied by a GitHub release; the README installs from the versioned tag.
+
+The synthetic demo deliberately contains three unsupported citations. Its expected export state
+is `partial`, with two passing and three failing citations; publication checks require those
+refusals rather than treating the entire answer as verified.
