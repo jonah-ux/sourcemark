@@ -168,9 +168,15 @@ def locate(
         s_ = doc.rfind("\n", 0, m.start) + 1
         e_ = doc.find("\n", m.end)
         e_ = len(doc) if e_ < 0 else e_
+        contained = m.similarity >= 0.999  # the whole quote is still there, plus additions
+        if not contained and len(exact) <= LINE_MODE_CHARS:
+            # Rounding a character hit out to lines can take in a line the edit added, or stop
+            # one short; score windows as tall as the quote around it too.
+            w = _same_height(doc, s_, exact)
+            if w is not None and w[2] > SequenceMatcher(None, doc[s_:e_], exact, autojunk=False).ratio():
+                s_, e_ = w[0], w[1]
         if (s_, e_) != (m.start, m.end):
             sim = SequenceMatcher(None, doc[s_:e_], exact, autojunk=False).ratio()
-            contained = m.similarity >= 0.999  # the whole quote is still there, plus additions
             if sim < min_similarity and not (contained and _context_score(doc, s_, e_, prefix, suffix, worst=True) >= min_context):
                 return None
             m = Match(s_, e_, min(sim, 0.99), m.method, _context_score(doc, s_, e_, prefix, suffix))
@@ -355,6 +361,30 @@ def _line_span(doc: str, lo: int, hi: int, exact: str) -> tuple[int, int, float]
     e = offs[a1] + len(wl[a1])
     sim = SequenceMatcher(None, doc[s:e].split("\n"), el, autojunk=False).ratio()
     return s, e, sim
+
+
+def _same_height(doc: str, start: int, exact: str) -> tuple[int, int, float] | None:
+    """The best window of whole lines, as many as ``exact`` has, starting at ``start``'s line or
+    the next (a hit can begin on the line before an edited first line; never look above it)."""
+    n = exact.count("\n") + 1
+    starts = [start]
+    nxt = doc.find("\n", start)
+    if nxt >= 0:
+        starts.append(nxt + 1)
+    best: tuple[int, int, float] | None = None
+    for s in dict.fromkeys(starts):
+        e = s
+        for _ in range(n):
+            nl = doc.find("\n", e)
+            if nl < 0:
+                e = len(doc)
+                break
+            e = nl + 1
+        e = e - 1 if e > s and doc[e - 1] == "\n" else e
+        sim = SequenceMatcher(None, doc[s:e], exact, autojunk=False).ratio()
+        if best is None or sim > best[2]:
+            best = (s, e, sim)
+    return best
 
 
 def _better(a: Match, b: Match, hint_start: int | None) -> bool:
