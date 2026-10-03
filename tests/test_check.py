@@ -969,6 +969,48 @@ class CodexRolloutTest(unittest.TestCase):
         self.assertEqual(check_text("a.py:15", sess).checks[0].verdict, "verified")
         self.assertEqual(check_text("a.py:21", sess).checks[0].verdict, "unread_lines")
 
+    def test_batch_cells_from_lists_templates_and_json(self):
+        """From real rollouts: commands mapped over a list, printed under headers or as JSON."""
+        from sourcemark.observe import read_transcript
+
+        d = self.d
+        tuples = ('const cmds = [\n  ["env", "uname -a", 30000],\n  ["memory", "grep -n x5 a.py", 30000],\n];\n'
+                  'const results = await Promise.all(cmds.map(async ([name, cmd, y]) => {\n'
+                  '  const r = await tools.exec_command({cmd, workdir: "%s", yield_time_ms: y});\n  return {name, ...r};\n}));\n'
+                  'for (const r of results) text(`=== ${r.name} ===\\n${r.output}\\n[exit ${r.exit_code}]`);' % d)
+        tuples_out = "=== env ===\nDarwin\n[exit 0]\n=== memory ===\n5:x5 = 5\n50:x50 = 50\n[exit 0]\n"
+        tpl = ('const paths = ["%s/a.py"];\nconst more = ["b"];\n'
+               'const rs = await Promise.all(paths.map(p => tools.exec_command({cmd: `sed -n \'60,62p\' \'${p}\'`, workdir: "%s"})));\n'
+               'rs.forEach((r,i)=>{ text(`--- ${paths[i]} ---\\n${r.output}`); });' % (d, d))
+        tpl_out = "--- %s/a.py ---\nx60 = 60\nx61 = 61\nx62 = 62\n" % d
+        js = ('const cmds = [["sed -n \'70,71p\' a.py", "why"], ["grep -n x9 a.py", "why"]];\n'
+              'const results = await Promise.allSettled(cmds.map(async ([cmd, why]) => {\n'
+              '  const r = await tools.exec_command({cmd, workdir:"%s"});\n  return {cmd, output:r.output, exit_code:r.exit_code};\n}));\n'
+              'for (const r of results) text(JSON.stringify(r.value));' % d)
+        js_out = json.dumps({"cmd": "sed -n '70,71p' a.py", "output": "x70 = 70\nx71 = 71\n", "exit_code": 0}) + json.dumps({"cmd": "grep -n x9 a.py", "output": "9:x9 = 9\n90:x90 = 90\n", "exit_code": 0})
+        sess, _ = read_transcript(self.rollout(d, [(tuples, tuples_out), (tpl, tpl_out), (js, js_out)]))
+        for cite in ("a.py:5", "a.py:50", "a.py:61", "a.py:70-71", "a.py:90"):
+            self.assertEqual(check_text(cite, sess).checks[0].verdict, "verified", cite)
+        self.assertEqual(check_text("a.py:63", sess).checks[0].verdict, "unread_lines")
+
+    def test_batch_cells_with_unknown_split_give_no_lines(self):
+        from sourcemark.observe import read_transcript
+
+        d = self.d
+        # Headers that do not frame each label exactly once, and a cell whose output may carry text
+        # after each output: no plain slices are credited.
+        dup = ('const paths = ["%s/a.py", "%s/a.py"];\n'
+               'const rs = await Promise.all(paths.map(p => tools.exec_command({cmd: `sed -n \'10,11p\' \'${p}\'`})));\n'
+               'rs.forEach((r,i)=>{ text(`--- ${paths[i]} ---\\n${r.output}`); });' % (d, d))
+        dup_out = "--- {0}/a.py ---\nx10 = 10\nx11 = 11\n--- {0}/a.py ---\nx10 = 10\nx11 = 11\n".format(d)
+        tail = ('const cmds = [["one", "sed -n \'30,31p\' a.py"], ["two", "uname"]];\n'
+                'const rs = await Promise.all(cmds.map(async ([name, cmd]) => ({name, ...(await tools.exec_command({cmd, workdir: "%s"}))})));\n'
+                'for (const r of rs) text(`## ${r.name}\\n${r.output}\\n(exit ${r.exit_code})`);' % d)
+        tail_out = "## one\nx30 = 30\nx31 = 31\n(exit 0)\n## two\nDarwin\n(exit 0)\n"
+        sess, _ = read_transcript(self.rollout(d, [(dup, dup_out), (tail, tail_out)]))
+        for cite in ("a.py:10", "a.py:31"):
+            self.assertNotEqual(check_text(cite, sess).checks[0].verdict, "verified", cite)
+
     def test_json_form_and_failures(self):
         from sourcemark.observe import read_transcript
 
