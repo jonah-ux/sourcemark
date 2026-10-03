@@ -45,6 +45,14 @@ Each [release](https://github.com/jonah-ux/sourcemark/releases) also ships a whe
 `SHA256SUMS`; `pip install sourcemark-0.5.1-py3-none-any.whl` after checking the hash. Python 3.11+,
 no dependencies.
 
+### Verify a release
+
+Releases after v0.5.1 carry signed GitHub build provenance for the wheel and sdist, alongside `SHA256SUMS`. To check that a downloaded file was built by this repository's release workflow:
+
+```console
+gh attestation verify sourcemark-*.whl --repo jonah-ux/sourcemark
+```
+
 ## Usage
 
 ```console
