@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Validate export records during the actual transcript read instead of a separate preflight.
+  Reject malformed, non-object, invalid UTF-8, or unreadable delegated evidence without an
+  export, while preserving the ordinary transcript readers' handling of incomplete logs.
+- Capture the root export input in a private temporary snapshot so an in-place rewrite
+  cannot change the format decision or omit citations. In-memory buffering uses a 1 MiB
+  threshold; temporary files may hold the full transcript and are cleaned on success or failure.
+
 ## 0.5.0 — 2026-10-02
 
 Learned from the real Codex citations the independent oracle saw but the checker flagged. Every fix has a regression test built from the real cell shape.

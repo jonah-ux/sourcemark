@@ -106,14 +106,16 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    if args.export and not _valid_jsonl(args.transcript):
-        print("sourcemark: check export refused: malformed transcript", file=sys.stderr)
-        return 2
     try:
-        sess, texts = read_transcript(args.transcript)
-    except (OSError, ValueError, TypeError):
+        sess, texts = read_transcript(args.transcript, strict_jsonl=bool(args.export))
+    except OSError:
         if args.export:
             print("sourcemark: check export refused: unreadable transcript", file=sys.stderr)
+            return 2
+        raise
+    except (ValueError, TypeError, AttributeError, KeyError):
+        if args.export:
+            print("sourcemark: check export refused: malformed transcript", file=sys.stderr)
             return 2
         raise
     try:
@@ -152,20 +154,6 @@ def cmd_check(args: argparse.Namespace) -> int:
     lines.append(f"-- {rep.passing}/{rep.total} backed by this session")
     _out(args, rep.to_dict(), "\n".join(lines))
     return 1 if any(c.verdict in failing() for c in rep.checks) else 0
-
-
-def _valid_jsonl(path: str) -> bool:
-    """Reject malformed input on the explicit export path without echoing it."""
-
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                if line.strip():
-                    if not isinstance(json.loads(line), dict):
-                        return False
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        return False
-    return True
 
 
 def cmd_verify(args: argparse.Namespace) -> int:

@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import fnmatch
 import functools
+import io
 import json
 import os
 import re
 import shlex
+import shutil
+import tempfile
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator
@@ -1338,10 +1341,39 @@ def _split_by_echo_markers(segments: list[str], stdout: str, printers: dict[int,
 
 
 _RUNTIME_NOTICES = ("<task-notification>", "<system-reminder>", "<command-name>", "<local-command")
+_STRICT_TRANSCRIPT_SPOOL_MAX_MEMORY = 1 << 20
 
 
-def read_claude_transcript(path: str, subagents: bool = True) -> tuple[Session, list[tuple[str, str]]]:
-    """Parse a Claude Code JSONL transcript.
+def _jsonl_record(line: str, line_number: int, *, strict_jsonl: bool) -> dict[str, Any] | None:
+    """Decode one JSONL record, keeping strict-mode errors bounded.
+
+    Blank lines are not records and remain ignored in both modes. The regular
+    readers historically ignored malformed JSON and JSON values other than
+    objects, so that behavior is retained when ``strict_jsonl`` is false.
+    """
+    if not line.strip():
+        return None
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        if strict_jsonl:
+            raise ValueError(f"malformed JSONL record at line {line_number}") from None
+        return None
+    if not isinstance(event, dict):
+        if strict_jsonl:
+            raise ValueError(f"JSONL record at line {line_number} must be an object")
+        return None
+    return event
+
+
+def _read_claude_stream(
+    lines: Iterable[str],
+    path: str,
+    *,
+    subagents: bool,
+    strict_jsonl: bool,
+) -> tuple[Session, list[tuple[str, str]]]:
+    """Parse Claude events from an already-open stream.
 
     Returns the session observations and the assistant text messages as
     ``(timestamp, text)`` in order. Subagent transcripts stored next to the
@@ -1352,75 +1384,71 @@ def read_claude_transcript(path: str, subagents: bool = True) -> tuple[Session, 
     texts: list[tuple[str, str]] = []
     pending: dict[str, tuple[str, dict[str, Any]]] = {}
     turn = 0
-    with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            try:
-                e = json.loads(line)
-            except json.JSONDecodeError:
+    for line_number, line in enumerate(lines, 1):
+        e = _jsonl_record(line, line_number, strict_jsonl=strict_jsonl)
+        if e is None:
+            continue
+        if e.get("type") == "pr-link" and isinstance(e.get("prUrl"), str):
+            # The runtime records PRs the session opened or linked: the session produced that URL.
+            sess.urls.add(normalize_url(e["prUrl"]))
+        if e.get("cwd"):
+            sess.cwd = sess.cwd or e["cwd"]
+            sess.cwds.add(e["cwd"])
+            sess.last_cwd = e["cwd"]
+        msg = e.get("message") if isinstance(e.get("message"), dict) else {}
+        content = msg.get("content")
+        at = e.get("timestamp")
+        if e.get("type") == "user" and not e.get("isMeta"):
+            prompt = isinstance(content, str) or (
+                isinstance(content, list)
+                and any(isinstance(c, dict) and c.get("type") == "text" for c in content)
+                and not any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content)
+            )
+            origin = e.get("origin") if isinstance(e.get("origin"), dict) else {}
+            text0 = content if isinstance(content, str) else ""
+            if origin.get("kind") not in (None, "human", "user") or text0.lstrip().startswith(_RUNTIME_NOTICES):
+                prompt = False  # a background-task notice is not the human starting a new turn
+            if prompt:
+                turn += 1  # a new human prompt starts a new turn
+        if e.get("type") == "user" and isinstance(content, str):
+            sess.urls |= urls_in(content)  # a link the user gave is sourced
+        if not isinstance(content, list):
+            continue
+        for c in content:
+            if not isinstance(c, dict):
                 continue
-            if not isinstance(e, dict):
-                continue  # a stray array or scalar line must not abort the whole check
-            if e.get("type") == "pr-link" and isinstance(e.get("prUrl"), str):
-                # The runtime records PRs the session opened or linked: the session produced that URL.
-                sess.urls.add(normalize_url(e["prUrl"]))
-            if e.get("cwd"):
-                sess.cwd = sess.cwd or e["cwd"]
-                sess.cwds.add(e["cwd"])
-                sess.last_cwd = e["cwd"]
-            msg = e.get("message") if isinstance(e.get("message"), dict) else {}
-            content = msg.get("content")
-            at = e.get("timestamp")
-            if e.get("type") == "user" and not e.get("isMeta"):
-                prompt = isinstance(content, str) or (
-                    isinstance(content, list)
-                    and any(isinstance(c, dict) and c.get("type") == "text" for c in content)
-                    and not any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content)
-                )
-                origin = e.get("origin") if isinstance(e.get("origin"), dict) else {}
-                text0 = content if isinstance(content, str) else ""
-                if origin.get("kind") not in (None, "human", "user") or text0.lstrip().startswith(_RUNTIME_NOTICES):
-                    prompt = False  # a background-task notice is not the human starting a new turn
-                if prompt:
-                    turn += 1  # a new human prompt starts a new turn
-            if e.get("type") == "user" and isinstance(content, str):
-                sess.urls |= urls_in(content)  # a link the user gave is sourced
-            if not isinstance(content, list):
-                continue
-            for c in content:
-                if not isinstance(c, dict):
-                    continue
-                if c.get("type") == "tool_use":
-                    pending[c.get("id", "")] = (c.get("name", ""), c.get("input") or {})
-                elif c.get("type") == "text" and e.get("type") == "assistant":
-                    texts.append((at or "", c.get("text", "")))
-                    sess.text_turns.append(turn)
-                elif c.get("type") == "text" and e.get("type") == "user":
-                    sess.urls |= urls_in(c.get("text", ""))
-                elif c.get("type") == "tool_result":
-                    name, tin = pending.get(c.get("tool_use_id", ""), ("", {}))
-                    tur = e.get("toolUseResult")
-                    # Any URL that came back from ANY tool (gh pr create, curl, WebFetch, MCP...) is sourced;
-                    # inputs count only for web tools (a fetched URL), not for arbitrary commands.
-                    if name in _AUTHORING_TOOLS:
-                        pass  # the agent's own writing echoed back is not a source for its links
-                    elif name in _DELEGATING_TOOLS:
-                        # A subagent's report: the orchestrator did not fetch these itself.
-                        sess.delegated_urls |= urls_in(tur if tur is not None else c.get("content"))
-                    elif not is_error_result(tur, c.get("content"), bool(c.get("is_error"))):
-                        # A URL inside an error ("fetch failed: https://...") was not obtained.
-                        got = urls_in(tur if tur is not None else c.get("content"))
-                        if name in ("Bash", "Shell") and isinstance(tin, dict):
-                            cmd = str(tin.get("command", ""))
-                            got -= urls_in(cmd)  # `echo https://x` returns what the agent typed
-                            out_text = tur.get("stdout") if isinstance(tur, dict) else _text_of(c.get("content"))
-                            sess.urls |= gh_refs(cmd, out_text if isinstance(out_text, str) else "")
-                        sess.urls |= got
-                        if _is_web_tool(name):
-                            sess.urls |= urls_in(tin)
-                    for obs in observe_tool(
-                        name, tin, tur, c.get("content"), e.get("cwd") or sess.cwd, at, bool(c.get("is_error"))
-                    ):
-                        sess.add(obs)
+            if c.get("type") == "tool_use":
+                pending[c.get("id", "")] = (c.get("name", ""), c.get("input") or {})
+            elif c.get("type") == "text" and e.get("type") == "assistant":
+                texts.append((at or "", c.get("text", "")))
+                sess.text_turns.append(turn)
+            elif c.get("type") == "text" and e.get("type") == "user":
+                sess.urls |= urls_in(c.get("text", ""))
+            elif c.get("type") == "tool_result":
+                name, tin = pending.get(c.get("tool_use_id", ""), ("", {}))
+                tur = e.get("toolUseResult")
+                # Any URL that came back from ANY tool (gh pr create, curl, WebFetch, MCP...) is sourced;
+                # inputs count only for web tools (a fetched URL), not for arbitrary commands.
+                if name in _AUTHORING_TOOLS:
+                    pass  # the agent's own writing echoed back is not a source for its links
+                elif name in _DELEGATING_TOOLS:
+                    # A subagent's report: the orchestrator did not fetch these itself.
+                    sess.delegated_urls |= urls_in(tur if tur is not None else c.get("content"))
+                elif not is_error_result(tur, c.get("content"), bool(c.get("is_error"))):
+                    # A URL inside an error ("fetch failed: https://...") was not obtained.
+                    got = urls_in(tur if tur is not None else c.get("content"))
+                    if name in ("Bash", "Shell") and isinstance(tin, dict):
+                        cmd = str(tin.get("command", ""))
+                        got -= urls_in(cmd)  # `echo https://x` returns what the agent typed
+                        out_text = tur.get("stdout") if isinstance(tur, dict) else _text_of(c.get("content"))
+                        sess.urls |= gh_refs(cmd, out_text if isinstance(out_text, str) else "")
+                    sess.urls |= got
+                    if _is_web_tool(name):
+                        sess.urls |= urls_in(tin)
+                for obs in observe_tool(
+                    name, tin, tur, c.get("content"), e.get("cwd") or sess.cwd, at, bool(c.get("is_error"))
+                ):
+                    sess.add(obs)
     if subagents:
         sub_dir = os.path.join(path[: -len(".jsonl")] if path.endswith(".jsonl") else path, "subagents")
         if os.path.isdir(sub_dir):
@@ -1428,14 +1456,38 @@ def read_claude_transcript(path: str, subagents: bool = True) -> tuple[Session, 
                 if not name.endswith(".jsonl"):
                     continue
                 try:
-                    sub, _ = read_claude_transcript(os.path.join(sub_dir, name), subagents=False)
+                    sub, _ = _read_claude_path(
+                        os.path.join(sub_dir, name), subagents=False, strict_jsonl=strict_jsonl
+                    )
                 except OSError:
+                    if strict_jsonl:
+                        raise
                     continue
                 for o in sub.observations:
                     o.delegated = True
                     sess.observations.append(o)
                 sess.delegated_urls |= sub.urls - sess.urls
     return sess, texts
+
+
+def _read_claude_path(
+    path: str, *, subagents: bool, strict_jsonl: bool
+) -> tuple[Session, list[tuple[str, str]]]:
+    # Claude's direct reader historically used strict UTF-8 decoding. The
+    # transcript dispatcher uses this helper with the requested error policy.
+    with open(path, encoding="utf-8") as fh:
+        return _read_claude_stream(fh, path, subagents=subagents, strict_jsonl=strict_jsonl)
+
+
+def read_claude_transcript(path: str, subagents: bool = True) -> tuple[Session, list[tuple[str, str]]]:
+    """Parse a Claude Code JSONL transcript.
+
+    Returns the session observations and the assistant text messages as
+    ``(timestamp, text)`` in order. Subagent transcripts stored next to the
+    session (``<session>/subagents/*.jsonl``) are loaded as *delegated*
+    observations: the orchestrator did not read those lines itself.
+    """
+    return _read_claude_path(path, subagents=subagents, strict_jsonl=False)
 
 
 _AUTHORING_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "TodoWrite"}
@@ -1928,111 +1980,170 @@ def _codex_output(out: Any) -> str | None:
     return text[m.end() :] if m else None
 
 
-def read_codex_transcript(path: str) -> tuple[Session, list[tuple[str, str]]]:
-    """Parse a Codex rollout (``~/.codex/sessions/.../rollout-*.jsonl``). Same contract as
-    :func:`read_claude_transcript`. Forked subagent threads live in their own rollouts and are
-    not loaded; their reports reach this session as delegated URLs."""
+def _read_codex_stream(
+    lines: Iterable[str], *, strict_jsonl: bool
+) -> tuple[Session, list[tuple[str, str]]]:
+    """Parse Codex events from an already-open stream."""
     sess = Session()
     texts: list[tuple[str, str]] = []
     calls: dict[str, tuple[str, str]] = {}  # call_id -> (name, input)
     turn = 0
     cwd: str | None = None
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            try:
-                e = json.loads(line)
-            except json.JSONDecodeError:
+    for line_number, line in enumerate(lines, 1):
+        e = _jsonl_record(line, line_number, strict_jsonl=strict_jsonl)
+        if e is None or not isinstance(e.get("payload"), dict):
+            continue
+        p, at = e["payload"], e.get("timestamp")
+        if e.get("type") == "turn_context" and isinstance(p.get("cwd"), str):
+            cwd = p["cwd"]
+            sess.cwd = sess.cwd or cwd
+            sess.cwds.add(cwd)
+            sess.last_cwd = cwd
+            continue
+        if e.get("type") != "response_item":
+            continue
+        kind = p.get("type")
+        if kind == "message":
+            body = "\n".join(c.get("text", "") for c in p.get("content") or [] if isinstance(c, dict))
+            if p.get("role") == "assistant":
+                texts.append((at or "", body))
+                sess.text_turns.append(turn)
+            elif p.get("role") == "user":
+                if not body.lstrip().startswith("<"):
+                    turn += 1  # a human prompt, not an injected <environment_context> block
+                sess.urls |= urls_in(body)
+        elif kind in ("custom_tool_call", "function_call"):
+            calls[p.get("call_id", "")] = (p.get("name", ""), p.get("input") or p.get("arguments") or "")
+        elif kind in ("custom_tool_call_output", "function_call_output"):
+            name, code = calls.get(p.get("call_id", ""), ("", ""))
+            out = p.get("output")
+            text = _codex_text(out)
+            if any(t in code or t == name for t in _CODEX_AUTHORING):
+                continue  # the agent's own words echoed back
+            if any(t in code or t == name for t in _CODEX_DELEGATING):
+                sess.delegated_urls |= urls_in(text)
                 continue
-            if not isinstance(e, dict) or not isinstance(e.get("payload"), dict):
+            if name != "exec":
                 continue
-            p, at = e["payload"], e.get("timestamp")
-            if e.get("type") == "turn_context" and isinstance(p.get("cwd"), str):
-                cwd = p["cwd"]
-                sess.cwd = sess.cwd or cwd
-                sess.cwds.add(cwd)
-                sess.last_cwd = cwd
+            sess.urls |= urls_in(text) - urls_in(code)  # `echo https://x` returns what was typed
+            cell = codex_exec_cell(code)
+            stdout = _codex_output(out)
+            if stdout is None:
                 continue
-            if e.get("type") != "response_item":
-                continue
-            kind = p.get("type")
-            if kind == "message":
-                body = "\n".join(c.get("text", "") for c in p.get("content") or [] if isinstance(c, dict))
-                if p.get("role") == "assistant":
-                    texts.append((at or "", body))
-                    sess.text_turns.append(turn)
-                elif p.get("role") == "user":
-                    if not body.lstrip().startswith("<"):
-                        turn += 1  # a human prompt, not an injected <environment_context> block
-                    sess.urls |= urls_in(body)
-            elif kind in ("custom_tool_call", "function_call"):
-                calls[p.get("call_id", "")] = (p.get("name", ""), p.get("input") or p.get("arguments") or "")
-            elif kind in ("custom_tool_call_output", "function_call_output"):
-                name, code = calls.get(p.get("call_id", ""), ("", ""))
-                out = p.get("output")
-                text = _codex_text(out)
-                if any(t in code or t == name for t in _CODEX_AUTHORING):
-                    continue  # the agent's own words echoed back
-                if any(t in code or t == name for t in _CODEX_DELEGATING):
-                    sess.delegated_urls |= urls_in(text)
-                    continue
-                if name != "exec":
-                    continue
-                sess.urls |= urls_in(text) - urls_in(code)  # `echo https://x` returns what was typed
-                cell = codex_exec_cell(code)
-                stdout = _codex_output(out)
-                if stdout is None:
-                    continue
-                if cell is None:
-                    if "tools.exec_command" in code:
-                        cut, uncut = _codex_uncut(stdout)
-                        batch = _cell_batch_evidence(code, uncut, cwd, at, cut)
-                        if batch is None:
-                            batch = _labelled_batch_evidence(code, uncut, cwd, at)
-                        for o in _batch_grep_evidence(code, uncut, cwd, at) + batch:
-                            sess.add(o)
-                    continue
-                args, form = cell
-                exit_code = 0
-                if form == "json":
-                    try:
-                        res = json.loads(stdout)
-                    except ValueError:
-                        continue
-                    if not isinstance(res, dict) or not isinstance(res.get("output"), str):
-                        continue
-                    stdout, exit_code = res["output"], res.get("exit_code") or 0
-                cmd = expand_assignments(args["cmd"])
-                wd = args.get("workdir") if isinstance(args.get("workdir"), str) else None
-                ecwd = os.path.join(cwd, wd) if wd and cwd and not os.path.isabs(wd) else (wd or cwd)
-                sess.urls |= gh_refs(cmd, stdout)
-                if exit_code:
-                    # Failed: the printed lines cannot be trusted as the file. File-level only.
-                    for o in from_shell_touches(cmd, effective_cwd(cmd, ecwd), set(), at):
+            if cell is None:
+                if "tools.exec_command" in code:
+                    cut, uncut = _codex_uncut(stdout)
+                    batch = _cell_batch_evidence(code, uncut, cwd, at, cut)
+                    if batch is None:
+                        batch = _labelled_batch_evidence(code, uncut, cwd, at)
+                    for o in _batch_grep_evidence(code, uncut, cwd, at) + batch:
                         sess.add(o)
+                continue
+            args, form = cell
+            exit_code = 0
+            if form == "json":
+                try:
+                    res = json.loads(stdout)
+                except ValueError:
                     continue
-                cut, stdout = _codex_uncut(stdout)
-                for o in observe_tool("Bash", {"command": cmd}, {"stdout": stdout}, "", ecwd, at):
-                    if cut and o.line_numbers is None and o.lines:
-                        # The middle was cut: lines placed by counting would be misplaced. Keep
-                        # only lines that carry their own numbers (grep hits, nl / cat -n).
-                        o = Observation(o.path, 0, [], "Bash-touch", o.at, line_numbers=[])
+                if not isinstance(res, dict) or not isinstance(res.get("output"), str):
+                    continue
+                stdout, exit_code = res["output"], res.get("exit_code") or 0
+            cmd = expand_assignments(args["cmd"])
+            wd = args.get("workdir") if isinstance(args.get("workdir"), str) else None
+            ecwd = os.path.join(cwd, wd) if wd and cwd and not os.path.isabs(wd) else (wd or cwd)
+            sess.urls |= gh_refs(cmd, stdout)
+            if exit_code:
+                # Failed: the printed lines cannot be trusted as the file. File-level only.
+                for o in from_shell_touches(cmd, effective_cwd(cmd, ecwd), set(), at):
                     sess.add(o)
+                continue
+            cut, stdout = _codex_uncut(stdout)
+            for o in observe_tool("Bash", {"command": cmd}, {"stdout": stdout}, "", ecwd, at):
+                if cut and o.line_numbers is None and o.lines:
+                    # The middle was cut: lines placed by counting would be misplaced. Keep
+                    # only lines that carry their own numbers (grep hits, nl / cat -n).
+                    o = Observation(o.path, 0, [], "Bash-touch", o.at, line_numbers=[])
+                sess.add(o)
     return sess, texts
 
 
-def read_transcript(path: str) -> tuple[Session, list[tuple[str, str]]]:
-    """Read a Claude Code transcript or a Codex rollout, whichever ``path`` is."""
+def _read_codex_path(
+    path: str, *, strict_jsonl: bool
+) -> tuple[Session, list[tuple[str, str]]]:
+    # Codex's direct reader historically replaced malformed UTF-8. Keep that
+    # behavior for tolerant callers; the dispatcher selects strict decoding for
+    # an explicit export admission.
+    errors = None if strict_jsonl else "replace"
+    if errors is None:
+        with open(path, encoding="utf-8") as fh:
+            return _read_codex_stream(fh, strict_jsonl=strict_jsonl)
+    with open(path, encoding="utf-8", errors=errors) as fh:
+        return _read_codex_stream(fh, strict_jsonl=strict_jsonl)
+
+
+def read_codex_transcript(path: str) -> tuple[Session, list[tuple[str, str]]]:
+    """Parse a Codex rollout (``~/.codex/sessions/.../rollout-*.jsonl``). Same contract as
+    :func:`read_claude_transcript`. Forked subagent threads live in their own rollouts and are
+    not loaded; their reports reach this session as delegated URLs."""
+    return _read_codex_path(path, strict_jsonl=False)
+
+
+def _is_codex_record(event: dict[str, Any]) -> bool:
+    return event.get("type") in ("session_meta", "response_item", "turn_context") and "payload" in event
+
+
+def _detect_transcript_kind(lines: Iterable[str], *, strict_jsonl: bool) -> bool:
+    """Return whether the first JSON object identifies a Codex rollout."""
+    for line_number, line in enumerate(lines, 1):
+        event = _jsonl_record(line, line_number, strict_jsonl=strict_jsonl)
+        if event is not None:
+            return _is_codex_record(event)
+    return False
+
+
+def _read_strict_transcript(path: str) -> tuple[Session, list[tuple[str, str]]]:
+    """Read and parse one immutable private snapshot of a transcript.
+
+    The source path is opened once in binary mode. A spooled temporary file
+    keeps small transcripts in memory and rolls larger inputs to a private,
+    automatically removed temporary file before format detection or parsing.
+    """
+    with tempfile.SpooledTemporaryFile(
+        max_size=_STRICT_TRANSCRIPT_SPOOL_MAX_MEMORY, mode="w+b"
+    ) as snapshot:
+        with open(path, "rb") as source:
+            shutil.copyfileobj(source, snapshot)
+        snapshot.seek(0)
+        with io.TextIOWrapper(snapshot, encoding="utf-8") as lines:
+            is_codex = _detect_transcript_kind(lines, strict_jsonl=True)
+            lines.seek(0)
+            if is_codex:
+                return _read_codex_stream(lines, strict_jsonl=True)
+            return _read_claude_stream(lines, path, subagents=True, strict_jsonl=True)
+
+
+def read_transcript(
+    path: str, *, strict_jsonl: bool = False
+) -> tuple[Session, list[tuple[str, str]]]:
+    """Read a Claude Code transcript or a Codex rollout, whichever ``path`` is.
+
+    Strict mode decodes and parses the same private snapshot stream used for
+    format detection, rejecting malformed JSONL records before export
+    admission.
+    """
+    if strict_jsonl:
+        return _read_strict_transcript(path)
+
+    # Preserve the historical tolerant dispatch: the dispatcher probes with
+    # replacement decoding, then the format-specific direct reader applies its
+    # existing decoding policy (Claude strict UTF-8; Codex replacement UTF-8).
     with open(path, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            try:
-                e = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(e, dict):
-                if e.get("type") in ("session_meta", "response_item", "turn_context") and "payload" in e:
-                    return read_codex_transcript(path)
-                break
+        is_codex = _detect_transcript_kind(fh, strict_jsonl=False)
+    if is_codex:
+        return read_codex_transcript(path)
     return read_claude_transcript(path)
+
 
 def from_write(tool_input: dict[str, Any], at: str | None = None) -> Observation | None:
     """The agent authored this content, so it knows every line of it."""
