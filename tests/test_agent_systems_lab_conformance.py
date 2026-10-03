@@ -27,15 +27,18 @@ def export(state="ok", *, total=1, passing=1, failing=0, unknown=0, observations
 
 
 class AgentSystemsLabConformanceTests(unittest.TestCase):
-    def test_owner_manifest_pins_the_reviewed_adapter_and_privacy_boundary(self):
+    def test_owner_manifest_declares_native_contract_and_downstream_provenance(self):
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
         self.assertEqual(manifest["schema"], "agent-systems-lab-sourcemark-conformance/v1")
         self.assertEqual(manifest["native_schema"], "sourcemark/check/v1")
         self.assertEqual(manifest["shared_adapter"]["owner"], "agent-proof")
         self.assertRegex(manifest["shared_adapter"]["revision"], r"^[0-9a-f]{40}$")
         self.assertRegex(manifest["shared_adapter"]["manifest_sha256"], r"^[0-9a-f]{64}$")
-        self.assertFalse(manifest["privacy"]["raw_paths_exported"])
-        self.assertFalse(manifest["privacy"]["transcript_text_exported"])
+        self.assertEqual(manifest["states"], ["ok", "observed", "partial", "timed_out"])
+        self.assertEqual(manifest["counts"], ["total", "passing", "failing", "unknown", "observations", "timed_out"])
+        self.assertEqual(manifest["identities"], ["policy_sha256", "session_sha256"])
+        for key in ("raw_paths_exported", "quotes_exported", "transcript_text_exported", "urls_exported", "ledger_values_exported"):
+            self.assertIs(manifest["privacy"][key], False, key)
 
     def test_native_states_and_counts_are_validated(self):
         for state, values in (

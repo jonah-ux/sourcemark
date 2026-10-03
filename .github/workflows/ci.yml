@@ -45,7 +45,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path, PurePosixPath
           import tarfile
-          required = {"docs/walkthrough.html", "docs/releasing.md", "demos/demo.py", "tests/test_check_export.py"}
+          required = {"docs/walkthrough.html", "docs/releasing.md", "demos/demo.py", "tests/test_check_export.py", "conformance/agent-systems-lab.json"}
           with tarfile.open(next(Path("dist").glob("*.tar.gz"))) as archive:
               names = {"/".join(PurePosixPath(member.name).parts[1:]) for member in archive if member.isfile()}
           missing = sorted(required - names)
@@ -71,5 +71,7 @@ jobs:
           unset PYTHONPATH
           "$RUNNER_TEMP/sourcemark-wheel/bin/python" -c 'from pathlib import Path; import sys, sourcemark; source = Path(sourcemark.__file__).resolve(); assert source.is_relative_to(Path(sys.prefix).resolve()), source; print(source)'
           "$RUNNER_TEMP/sourcemark-wheel/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -p test_check_export.py -v
+          "$RUNNER_TEMP/sourcemark-wheel/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -p test_agent_systems_lab_conformance.py -v
           "$RUNNER_TEMP/sourcemark-sdist/bin/python" -c 'from pathlib import Path; import sys, sourcemark; source = Path(sourcemark.__file__).resolve(); assert source.is_relative_to(Path(sys.prefix).resolve()), source; print(source)'
           "$RUNNER_TEMP/sourcemark-sdist/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -p test_check_export.py -v
+          "$RUNNER_TEMP/sourcemark-sdist/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -p test_agent_systems_lab_conformance.py -v
