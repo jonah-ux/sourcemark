@@ -27,6 +27,16 @@
   two (`!MASTER-INDEXX.md`, `@classmethodX`, `p.settlement_revisionX`) is a `quote_mismatch`.
   Before, only bare names were soft-checked and these passed. A name the file has elsewhere
   is still a real name, not a misquote (`closedate` beside `closedDate`).
+- Shell helpers: a function the command defines and calls on its own
+  (`p(){ echo "## $1"; sed -n "$2p" $1 | nl -ba -v${2%%,*}; }; p a.ts 10,20`) is inlined with
+  its arguments, so what it printed is attributed. A function that moves its own arguments
+  (`shift`, `local`, `$#`) or is called inside a pipe is left as is.
+- `sed -n 'A,Bp' F | nl -ba -vA` (and `head`/`cat F | nl -ba`) prints the file's own line
+  numbers when the numbering starts where the slice starts. It is now read as such.
+- A code span that holds only citations, line lists included (`a.ts:282,411`,
+  `x.py:84, 190-193`), is not a quote of the citation beside it.
+- In a quote, a `{placeholder}` (`/crm/v6/Shop/{id}/Leads`) stands for the one the template
+  has. The text around it must still be there, in order.
 
 ## 0.5.1 — 2026-10-03
 
