@@ -125,7 +125,22 @@ def _follow_history(mark: Mark, doc: str, m: Match | None, old: str | None) -> t
     first, last = line - 1, line - 1 + exact.count("\n")
     col = start - o_offs[first]
     rows = [kept.get(i, edited.get(i)) for i in range(first, last + 1)]
-    if all(r is not None for r in rows) and rows == list(range(rows[0], rows[0] + len(rows))):
+    mapped = all(r is not None for r in rows)
+    if mapped and rows != list(range(rows[0], rows[0] + len(rows))):
+        # Every quoted line survives, in order, but lines were inserted between them: the cited
+        # block was edited. Accept a modest spread only; a scattered quote is not one block.
+        spread = rows[-1] - rows[0] + 1
+        if all(b > a for a, b in zip(rows, rows[1:])) and spread <= 2 * len(rows) + 3:
+            s0 = offs[rows[0]]
+            s1 = offs[rows[-1] + 1] - 1 if rows[-1] + 1 < len(offs) else len(doc)
+            if all(i in kept for i in range(first, last + 1)):
+                sim = 0.95  # every quoted line is there unchanged; only lines were inserted
+            else:
+                sim = difflib.SequenceMatcher(None, exact, doc[s0:s1], autojunk=False).ratio()
+            if sim >= DEFAULT_MIN_SIMILARITY:
+                return Match(s0, s1, round(min(sim, 0.99), 4), "history-edit", 0.0), True
+        return m, False
+    if mapped:
         at = offs[rows[0]] + col if rows[0] < len(offs) else None
         unchanged = all(i in kept for i in range(first, last + 1))  # an edit can keep a prefix
         if unchanged and at is not None and doc[at : at + len(exact)] == exact:
@@ -330,7 +345,7 @@ def resolve(
             followed, decided = _follow_history(mark, doc, m, _git(repo_root, "cat-file", "-p", src["git_blob"]))
             if decided:
                 if followed is not m:
-                    res.notes.append("duplicated quote: followed its line through the diff from the marked blob")
+                    res.notes.append("followed the cited lines through the diff from the marked blob")
                 m = followed
         if m is None:
             return False

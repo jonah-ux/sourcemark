@@ -579,3 +579,20 @@ class HistoryFollowTest(unittest.TestCase):
         self.commit("x = 0\n" + secret + "\ny = 0\n\n" + before)
         r = resolve(m, search=False)
         self.assertEqual((r.status, r.line_start), ("shifted", 6))
+
+    def test_lines_inserted_inside_the_quote_make_it_edited(self):
+        long = "2026-06-07: the studio was slow under MCP-process accumulation; proven safe against the live set."
+        before = "intro\n## Origin\n" + long + "\nrest\n"
+        self.commit(before)
+        m = mark_lines(before, 2, 3, source_for(self.p))
+        self.commit("intro\n## Origin\n\nA new paragraph was inserted here.\n" + long + "\nrest\n")
+        r = resolve(m, search=False)
+        self.assertEqual((r.status, r.line_start, r.line_end), ("edited", 2, 5))
+
+    def test_a_quote_scattered_across_the_file_is_not_one_block(self):
+        before = "alpha_line_one = 1\nbeta_line_two = 2\nend\n"
+        self.commit(before)
+        m = mark_lines(before, 1, 2, source_for(self.p))
+        filler = "".join(f"filler_{i} = {i}\n" for i in range(30))
+        self.commit("alpha_line_one = 1\n" + filler + "beta_line_two = 2\nend\n")
+        self.assertEqual(resolve(m, search=False).status, "orphaned")
