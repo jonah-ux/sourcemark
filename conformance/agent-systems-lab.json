@@ -1,0 +1,29 @@
+{
+  "schema": "agent-systems-lab-sourcemark-conformance/v1",
+  "owner": "sourcemark",
+  "native_schema": "sourcemark/check/v1",
+  "shared_adapter": {
+    "owner": "agent-proof",
+    "schema": "agent-proof/interop/v1",
+    "manifest_url": "https://github.com/jonah-ux/agent-proof/blob/06d78a662914a480f1376c81f0df7ae54a939de1/conformance/agent-systems-lab.json",
+    "revision": "06d78a662914a480f1376c81f0df7ae54a939de1",
+    "manifest_sha256": "62348cb59c986e3bba00af059774d433a5e3d68f48422c419ac6d6852d250de3"
+  },
+  "states": ["ok", "observed", "partial", "timed_out"],
+  "counts": ["total", "passing", "failing", "unknown", "observations", "timed_out"],
+  "identities": ["policy_sha256", "session_sha256"],
+  "refusals": [
+    "unsupported_state",
+    "invalid_count_set",
+    "unreconciled_counts",
+    "malformed_identity",
+    "unexpected_field"
+  ],
+  "privacy": {
+    "raw_paths_exported": false,
+    "quotes_exported": false,
+    "transcript_text_exported": false,
+    "urls_exported": false,
+    "ledger_values_exported": false
+  }
+}
