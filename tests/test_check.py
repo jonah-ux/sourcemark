@@ -429,9 +429,16 @@ class StrictnessTest(unittest.TestCase):
         out = from_shell('echo "--- a"; sed -n 5,6p /r/a.ts; echo "--- b"; sed -n 10,11p /r/b.ts', "--- a\nA5\nA6\n--- b\nB10\nB11\n", "/w")
         got = sorted((o.path, o.line_start, tuple(o.lines)) for o in out)
         self.assertEqual(got, [("/r/a.ts", 5, ("A5", "A6")), ("/r/b.ts", 10, ("B10", "B11"))])
-        # A command between a marker and the read pollutes the chunk: file-level only.
+        # A command between a marker and the read pollutes the chunk: the text is not attributed,
+        # only the line numbers `sed -n 5,6p` printed (as without markers).
         out = from_shell('echo "--- a"; git status; sed -n 5,6p /r/a.ts', "--- a\nM x\nA5\nA6\n", "/w")
-        self.assertEqual([(o.path, o.line_start) for o in out], [("/r/a.ts", 0)])
+        self.assertEqual(sorted((o.path, o.tool, tuple(o.line_numbers or [])) for o in out),
+                         [("/r/a.ts", "Bash-range", (5, 6)), ("/r/a.ts", "Bash-touch", ())])
+        self.assertTrue(all(t is None for o in out for t in o.lines))
+        # From a real session: a loop that unrolls into echo markers keeps the later read's numbers.
+        out = from_shell('for n in m1 vps; do echo "== $n"; ssh $n hostname; done; sed -n 10240,10242p /r/p',
+                         "== m1\nm1\n== vps\nvps\nl1\nl2\nl3\n", "/w")
+        self.assertIn(("/r/p", (10240, 10241, 10242)), [(o.path, tuple(o.line_numbers or [])) for o in out])
         # A marker that never appears in stdout: no attribution.
         out = from_shell('echo "--- a"; sed -n 5,6p /r/a.ts; sed -n 1,2p /r/b.ts', "A5\nA6\nB1\nB2\n", "/w")
         self.assertTrue(all(o.line_start == 0 for o in out))
@@ -969,6 +976,67 @@ class CodexRolloutTest(unittest.TestCase):
         self.assertEqual(check_text("a.py:15", sess).checks[0].verdict, "verified")
         self.assertEqual(check_text("a.py:21", sess).checks[0].verdict, "unread_lines")
 
+    def test_batch_cells_from_lists_templates_and_json(self):
+        """From real rollouts: commands mapped over a list, printed under headers or as JSON."""
+        from sourcemark.observe import read_transcript
+
+        d = self.d
+        tuples = ('const cmds = [\n  ["env", "uname -a", 30000],\n  ["memory", "grep -n x5 a.py", 30000],\n];\n'
+                  'const results = await Promise.all(cmds.map(async ([name, cmd, y]) => {\n'
+                  '  const r = await tools.exec_command({cmd, workdir: "%s", yield_time_ms: y});\n  return {name, ...r};\n}));\n'
+                  'for (const r of results) text(`=== ${r.name} ===\\n${r.output}\\n[exit ${r.exit_code}]`);' % d)
+        tuples_out = "=== env ===\nDarwin\n[exit 0]\n=== memory ===\n5:x5 = 5\n50:x50 = 50\n[exit 0]\n"
+        tpl = ('const paths = ["%s/a.py"];\nconst more = ["b"];\n'
+               'const rs = await Promise.all(paths.map(p => tools.exec_command({cmd: `sed -n \'60,62p\' \'${p}\'`, workdir: "%s"})));\n'
+               'rs.forEach((r,i)=>{ text(`--- ${paths[i]} ---\\n${r.output}`); });' % (d, d))
+        tpl_out = "--- %s/a.py ---\nx60 = 60\nx61 = 61\nx62 = 62\n" % d
+        js = ('const cmds = [["sed -n \'70,71p\' a.py", "why"], ["grep -n x9 a.py", "why"]];\n'
+              'const results = await Promise.allSettled(cmds.map(async ([cmd, why]) => {\n'
+              '  const r = await tools.exec_command({cmd, workdir:"%s"});\n  return {cmd, output:r.output, exit_code:r.exit_code};\n}));\n'
+              'for (const r of results) text(JSON.stringify(r.value));' % d)
+        js_out = json.dumps({"cmd": "sed -n '70,71p' a.py", "output": "x70 = 70\nx71 = 71\n", "exit_code": 0}) + json.dumps({"cmd": "grep -n x9 a.py", "output": "9:x9 = 9\n90:x90 = 90\n", "exit_code": 0})
+        sess, _ = read_transcript(self.rollout(d, [(tuples, tuples_out), (tpl, tpl_out), (js, js_out)]))
+        for cite in ("a.py:5", "a.py:50", "a.py:61", "a.py:70-71", "a.py:90"):
+            self.assertEqual(check_text(cite, sess).checks[0].verdict, "verified", cite)
+        self.assertEqual(check_text("a.py:63", sess).checks[0].verdict, "unread_lines")
+
+    def test_concatenated_outputs_read_as_one_sequential_command(self):
+        """From real rollouts: Promise.allSettled over literal calls, each output printed bare."""
+        from sourcemark.observe import read_transcript
+
+        d = self.d
+        code = ('const results = await Promise.allSettled([\n'
+                '  tools.exec_command({cmd:"uname -a",workdir:"%s"}),\n'
+                '  tools.exec_command({cmd:"rg -n \'x4[0-2] \' a.py | head -80",workdir:"%s"})\n]);\n'
+                'for (const r of results) text(r.status==="fulfilled" ? r.value.output : `ERROR: ${r.reason}`);' % (d, d))
+        out = "Darwin studio 25.3.0\n40:x40 = 40\n41:x41 = 41\n42:x42 = 42\n"
+        res_hdr = ('const results = await Promise.all([\n  tools.exec_command({cmd:"uname",workdir:"%s"}),\n'
+                   '  tools.exec_command({cmd:"grep -n \'x7\' a.py",workdir:"%s"})\n]);\n'
+                   'for (const [i, r] of results.entries()) {\n  text(`---RESULT ${i + 1}---\\n${r.output}`);\n}' % (d, d))
+        hdr_out = ("---RESULT 1---\nDarwin\n---RESULT 2---\nWarning: truncated output (original token count: 900)\n"
+                   "Total output lines: 40\n\n7:x7 = 7\n70:x70 = 70\n")
+        sess, _ = read_transcript(self.rollout(d, [(code, out), (res_hdr, hdr_out)]))
+        for cite in ("a.py:40-42", "a.py:7", "a.py:70"):
+            self.assertEqual(check_text(cite, sess).checks[0].verdict, "verified", cite)
+
+    def test_batch_cells_with_unknown_split_give_no_lines(self):
+        from sourcemark.observe import read_transcript
+
+        d = self.d
+        # Headers that do not frame each label exactly once, and a cell whose output may carry text
+        # after each output: no plain slices are credited.
+        dup = ('const paths = ["%s/a.py", "%s/a.py"];\n'
+               'const rs = await Promise.all(paths.map(p => tools.exec_command({cmd: `sed -n \'10,11p\' \'${p}\'`})));\n'
+               'rs.forEach((r,i)=>{ text(`--- ${paths[i]} ---\\n${r.output}`); });' % (d, d))
+        dup_out = "--- {0}/a.py ---\nx10 = 10\nx11 = 11\n--- {0}/a.py ---\nx10 = 10\nx11 = 11\n".format(d)
+        tail = ('const cmds = [["one", "sed -n \'30,31p\' a.py"], ["two", "uname"]];\n'
+                'const rs = await Promise.all(cmds.map(async ([name, cmd]) => ({name, ...(await tools.exec_command({cmd, workdir: "%s"}))})));\n'
+                'for (const r of rs) text(`## ${r.name}\\n${r.output}\\n(exit ${r.exit_code})`);' % d)
+        tail_out = "## one\nx30 = 30\nx31 = 31\n(exit 0)\n## two\nDarwin\n(exit 0)\n"
+        sess, _ = read_transcript(self.rollout(d, [(dup, dup_out), (tail, tail_out)]))
+        for cite in ("a.py:10", "a.py:31"):
+            self.assertNotEqual(check_text(cite, sess).checks[0].verdict, "verified", cite)
+
     def test_json_form_and_failures(self):
         from sourcemark.observe import read_transcript
 
@@ -1144,7 +1212,7 @@ class MidCommandCdTest(unittest.TestCase):
             'cd apps/web/src && cd "$SUB" && grep -rn x app',
             "cd - && grep -rn x app",
             "(cd apps/web/src && true); grep -rn x app",
-            "for d in apps; do cd $d; done; grep -rn x app",
+            "for d in */; do cd $d; done; grep -rn x app",
             "pushd apps/web/src; grep -rn x app",
         ):
             with self.subTest(cmd=cmd):
@@ -1175,6 +1243,57 @@ class AttachedOptionValueTest(unittest.TestCase):
         self.assertEqual([o for o in from_shell("grep -rNA2 OPTS app", out, d) if o.line_numbers], [])
 
 
+class CodexCellShapesTest(unittest.TestCase):
+    """From real Codex cells: one-file greps beside other printers, `for` loops, `bash -lc`."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="sm-cx-")
+        self.addCleanup(shutil.rmtree, self.d, True)
+        for f in ("a.md", "b.md", "M.md"):
+            with open(os.path.join(self.d, f), "w") as fh:
+                fh.write("x\n" * 400)
+
+    def nums(self, obs):
+        return {(os.path.basename(o.path), n) for o in obs for n in (o.line_numbers or [])}
+
+    def test_a_one_file_grep_printed_last_owns_the_ascending_tail(self):
+        cmd = "sed -n '1,3p' a.md; sed -n '1,2p' b.md; rg -n 'Spark|Codex Desktop' M.md | head -35"
+        out = "---\nname: x\n12: Spark in a.md's text\nfoo\nbar\n249:Spark node\n265:Codex Desktop app\n"
+        self.assertEqual({x for x in self.nums(from_shell(cmd, out, self.d)) if x[0] == "M.md"}, {("M.md", 249), ("M.md", 265)})
+
+    def test_a_one_file_grep_printed_first_owns_the_ascending_head(self):
+        cmd = "grep -n 'def ' M.md; sed -n '1,2p' a.md"
+        out = "3:def a():\n9:def b():\nheader\nbody\n"
+        self.assertEqual({x for x in self.nums(from_shell(cmd, out, self.d)) if x[0] == "M.md"}, {("M.md", 3), ("M.md", 9)})
+
+    def test_no_edge_block_when_another_command_prints_numbered_lines(self):
+        for cmd in ("grep -n x a.md; rg -n Spark M.md", "nl -ba a.md | sed -n '1,2p'; rg -n Spark M.md"):
+            with self.subTest(cmd=cmd):
+                obs = from_shell(cmd, "1:x\n249:Spark\n", self.d)
+                self.assertNotIn(("M.md", 249), self.nums(obs))
+
+    def test_a_literal_for_loop_is_read_as_the_commands_it_ran(self):
+        cmd = 'for f in a.md b.md; do echo "===== $f ====="; nl -ba "$f" | sed -n \'7,8p\'; done'
+        out = "===== a.md =====\n     7\ta\n     8\ta\n===== b.md =====\n     7\tb\n     8\tb\n"
+        self.assertEqual(self.nums(from_shell(cmd, out, self.d)), {("a.md", 7), ("a.md", 8), ("b.md", 7), ("b.md", 8)})
+
+    def test_loops_that_compute_their_words_or_values_are_not_unrolled(self):
+        for cmd in (
+            'for f in *.md; do echo "== $f"; nl -ba "$f"; done',
+            'for s in 1,2 3,4; do sed -n "${s}p" a.md | nl -ba -v ${s%,*}; done',
+            'for f in $(ls); do nl -ba "$f"; done',
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.nums(from_shell(cmd, "== a.md\n     1\ta\n", self.d)), set())
+
+    def test_a_shell_wrapper_is_read_as_its_script(self):
+        for cmd in ("bash -lc 'nl -ba a.md | sed -n \"5,6p\"'", 'sh -c "nl -ba a.md | sed -n 5,6p"',
+                    "worker-lifecycle run --kind helper --operation-id x -- sh -lc 'nl -ba a.md | sed -n 5,6p'"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.nums(from_shell(cmd, "     5\ta\n     6\ta\n", self.d)), {("a.md", 5), ("a.md", 6)})
+        self.assertEqual(self.nums(from_shell('bash -c "nl -ba $F | sed -n 5,6p"', "     5\ta\n", self.d)), set())
+
+
 class SelfNumberedAndBatchTest(unittest.TestCase):
     """From real Codex rollouts: `nl -ba F | sed -n 'A,Bp'` and multi-command cells."""
 
@@ -1198,10 +1317,31 @@ class SelfNumberedAndBatchTest(unittest.TestCase):
         obs = from_shell("nl -ba lib/a.py | sed -n '40,41p'; nl -ba lib/b.py | sed -n '3,3p'", out, self.d)
         self.assertEqual(self.nums(obs), {("a.py", 40), ("a.py", 41), ("b.py", 3)})
 
-    def test_continuing_numbers_hide_the_boundary(self):
+    def test_continuing_numbers_split_by_what_each_slice_can_print(self):
         out = "    40\ta40 = 40\n    41\ta41 = 41\n    90\tb90 = 90\n"
         obs = from_shell("nl -ba lib/a.py | sed -n '40,41p'; nl -ba lib/b.py | sed -n '90,90p'", out, self.d)
+        self.assertEqual(self.nums(obs), {("a.py", 40), ("a.py", 41), ("b.py", 90)})
+        # From a real Codex cell: three slices, two of one file, all ascending, in `bash -lc`.
+        cmd = "bash -lc 'nl -ba lib/a.py | sed -n \"18,19p\"; nl -ba lib/b.py | sed -n \"200,201p;250,250p\"; nl -ba lib/b.py | sed -n \"280,281p\"'"
+        out = "    18\ta\n    19\ta\n   200\tb\n   201\tb\n   250\tb\n   280\tb\n   281\tb\n"
+        self.assertEqual(self.nums(from_shell(cmd, out, self.d)), {("a.py", 18), ("a.py", 19), ("b.py", 200), ("b.py", 201), ("b.py", 250), ("b.py", 280), ("b.py", 281)})
+
+    def test_a_boundary_no_range_can_place_stays_file_level(self):
+        # gone.py's length is unknown: it may have ended at 60, so 61-62 could be b.py's.
+        out = "    40\tx\n" + "".join(f"    {n}\tx\n" for n in range(41, 63))
+        obs = from_shell("nl -ba lib/gone.py | sed -n '40,80p'; nl -ba lib/b.py | sed -n '61,62p'", out, self.d)
         self.assertEqual(self.nums(obs), set())
+        out = "    40\ta\n    42\ta\n    90\tb\n"  # a gap inside a range: not an `nl` slice
+        self.assertEqual(self.nums(from_shell("nl -ba lib/a.py | sed -n '40,45p'; nl -ba lib/b.py | sed -n '90p'", out, self.d)), set())
+
+    def test_nl_slices_beside_other_printers_keep_their_exact_shape(self):
+        cmd = "nl -ba lib/a.py | sed -n '30,31p'; rg -n -i 'redeem' lib other 2>/dev/null; wc -l lib/a.py"
+        out = "    30\ta30 = 30\n    31\ta31 = 31\nother/x.md:12:redeem\n299 lib/a.py\n"
+        self.assertTrue({("a.py", 30), ("a.py", 31)} <= self.nums(from_shell(cmd, out, self.d)))
+        for other in ("python3 -c 'print(1)'", "awk '{print NR}' lib/b.py", "cat -n lib/b.py", "for f in x; do nl $f; done", "echo $(nl lib/b.py)"):
+            with self.subTest(other=other):
+                obs = from_shell(f"nl -ba lib/a.py | sed -n '30,31p'; {other}", "    30\ta\n    31\ta\n", self.d)
+                self.assertNotIn(("a.py", 30), self.nums(obs))
 
     def test_renumbering_pipelines_are_not_self_numbered(self):
         from sourcemark.observe import _self_numbered
@@ -1290,6 +1430,20 @@ class LinkAsCodeTest(unittest.TestCase):
         got = {c.raw: c.claimed_quotes for c in extract(t)}
         self.assertTrue(all(not q.startswith("[") for qs in got.values() for q in qs), got)
         self.assertIn(["_start_work(x)"], list(got.values()))
+
+
+class OtherCopyTest(unittest.TestCase):
+    """From a real Codex rollout: one relative path read in two worktrees with different text."""
+
+    def test_a_quote_is_judged_against_any_read_copy_of_a_relative_path(self):
+        s = Session(cwd="/elsewhere")
+        s.add(Observation("/w/a/runtime/lib/sync.py", 110, ["x", "def plan(rows):", "y"], "Read", None))
+        s.add(Observation("/w/longer-name/runtime/lib/sync.py", 110, ["x", "def plan(rows, *, strict):", "y"], "Read", None))
+        r = check_text("`runtime/lib/sync.py:111` has `def plan(rows, *, strict):`", s).checks[0]
+        self.assertEqual((r.verdict, r.resolved_path), ("verified", "/w/longer-name/runtime/lib/sync.py"))
+        self.assertEqual(check_text("`runtime/lib/sync.py:111` has `def plan(cols):`", s).checks[0].verdict, "quote_mismatch")
+        # An absolute path names one file: no other copy is consulted.
+        self.assertEqual(check_text("`/w/a/runtime/lib/sync.py:111` has `def plan(rows, *, strict):`", s).checks[0].verdict, "quote_mismatch")
 
 
 class MisquotedNameTest(unittest.TestCase):
