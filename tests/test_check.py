@@ -993,6 +993,25 @@ class CodexRolloutTest(unittest.TestCase):
             self.assertEqual(check_text(cite, sess).checks[0].verdict, "verified", cite)
         self.assertEqual(check_text("a.py:63", sess).checks[0].verdict, "unread_lines")
 
+    def test_concatenated_outputs_read_as_one_sequential_command(self):
+        """From real rollouts: Promise.allSettled over literal calls, each output printed bare."""
+        from sourcemark.observe import read_transcript
+
+        d = self.d
+        code = ('const results = await Promise.allSettled([\n'
+                '  tools.exec_command({cmd:"uname -a",workdir:"%s"}),\n'
+                '  tools.exec_command({cmd:"rg -n \'x4[0-2] \' a.py | head -80",workdir:"%s"})\n]);\n'
+                'for (const r of results) text(r.status==="fulfilled" ? r.value.output : `ERROR: ${r.reason}`);' % (d, d))
+        out = "Darwin studio 25.3.0\n40:x40 = 40\n41:x41 = 41\n42:x42 = 42\n"
+        res_hdr = ('const results = await Promise.all([\n  tools.exec_command({cmd:"uname",workdir:"%s"}),\n'
+                   '  tools.exec_command({cmd:"grep -n \'x7\' a.py",workdir:"%s"})\n]);\n'
+                   'for (const [i, r] of results.entries()) {\n  text(`---RESULT ${i + 1}---\\n${r.output}`);\n}' % (d, d))
+        hdr_out = ("---RESULT 1---\nDarwin\n---RESULT 2---\nWarning: truncated output (original token count: 900)\n"
+                   "Total output lines: 40\n\n7:x7 = 7\n70:x70 = 70\n")
+        sess, _ = read_transcript(self.rollout(d, [(code, out), (res_hdr, hdr_out)]))
+        for cite in ("a.py:40-42", "a.py:7", "a.py:70"):
+            self.assertEqual(check_text(cite, sess).checks[0].verdict, "verified", cite)
+
     def test_batch_cells_with_unknown_split_give_no_lines(self):
         from sourcemark.observe import read_transcript
 
