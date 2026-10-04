@@ -32,13 +32,7 @@ the citation lifecycle. It uses the same harbor fixture as the demo: mark a line
 edit the wording, then resolve the citation and check the agent's answer. The page is a single
 dependency-free HTML file, so it does not require another Jonah-UX repository or a running service.
 
-From that checkout, the shortest useful first run after installing is still:
-
-```console
-python3 demos/demo.py --installed
-```
-
-That command creates and removes its own temporary git repository, prints each step, and exits
+The demo above creates and removes its own temporary git repository, prints each step, and exits
 non-zero if the moved/edited citation or the deliberate checker refusals do not appear.
 
 Each [release](https://github.com/jonah-ux/sourcemark/releases) also ships a wheel, an sdist and
@@ -69,13 +63,15 @@ readiness.
 
 ## Usage
 
+Replace `PROJECT` and `SESSION` with the transcript you want to check.
+
 ```console
 sourcemark mark src/app.py:40-42              # → [sm:7f3a9c2b1d]
-sourcemark resolve [sm:7f3a9c2b1d]            # intact | shifted | moved | edited | orphaned
+sourcemark resolve '[sm:7f3a9c2b1d]'          # intact | shifted | moved | edited | orphaned
 sourcemark mark-row public.orders 1042 status total --dsn "$DATABASE_URL"
-sourcemark resolve [sm:…] --dsn "$DATABASE_URL"   # intact | drifted (changed: total) | deleted
-sourcemark check ~/.claude/projects/<project>/<session>.jsonl
-sourcemark check ~/.claude/projects/<project>/<session>.jsonl --export v1
+sourcemark resolve '[sm:…]' --dsn "$DATABASE_URL"   # intact | drifted (changed: total) | deleted
+sourcemark check "$HOME/.claude/projects/PROJECT/SESSION.jsonl"
+sourcemark check "$HOME/.claude/projects/PROJECT/SESSION.jsonl" --export v1
 sourcemark verify-ledger
 ```
 
