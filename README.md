@@ -32,13 +32,7 @@ the citation lifecycle. It uses the same harbor fixture as the demo: mark a line
 edit the wording, then resolve the citation and check the agent's answer. The page is a single
 dependency-free HTML file, so it does not require another Jonah-UX repository or a running service.
 
-From that checkout, the shortest useful first run after installing is still:
-
-```console
-python3 demos/demo.py --installed
-```
-
-That command creates and removes its own temporary git repository, prints each step, and exits
+The demo above creates and removes its own temporary git repository, prints each step, and exits
 non-zero if the moved/edited citation or the deliberate checker refusals do not appear.
 
 Each [release](https://github.com/jonah-ux/sourcemark/releases) also ships a wheel, an sdist and
