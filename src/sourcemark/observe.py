@@ -507,24 +507,81 @@ def fetched_refs(command: str, stdout: str = "") -> set[str]:
     return urls
 
 
-def gh_refs(command: str, stdout: str = "") -> set[str]:
+_GH_REMOTE = re.compile(r"(?:https://(?:[^@/]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.\-]+/[\w.\-]+?)(?:\.git)?/?")
+
+
+@functools.lru_cache(maxsize=256)
+def _gh_repo_of(directory: str) -> str | None:
+    """The GitHub repo a bare ``gh pr view 12`` acts on in ``directory``: the repo's only
+    GitHub remote, or the one ``gh repo set-default`` picked. None outside a git repo, or when
+    several remotes leave it ambiguous."""
+    d = os.path.abspath(directory)
+    while not os.path.exists(os.path.join(d, ".git")):
+        if os.path.dirname(d) == d:
+            return None
+        d = os.path.dirname(d)
+    gitdir = os.path.join(d, ".git")
+    try:
+        if os.path.isfile(gitdir):  # a worktree or submodule: `gitdir: /main/.git/worktrees/x`
+            with open(gitdir, encoding="utf-8") as f:
+                m = re.match(r"gitdir:\s*(.+)", f.read().strip())
+            if not m:
+                return None
+            gitdir = os.path.join(d, m.group(1))
+            common = os.path.join(gitdir, "commondir")
+            if os.path.isfile(common):
+                with open(common, encoding="utf-8") as f:
+                    gitdir = os.path.join(gitdir, f.read().strip())
+        with open(os.path.join(gitdir, "config"), encoding="utf-8", errors="replace") as f:
+            config = f.read()
+    except OSError:
+        return None
+    remotes: dict[str, str] = {}
+    chosen: set[str] = set()
+    name = None
+    for line in config.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            m = re.match(r'\[remote\s+"([^"]+)"\]', line)
+            name = m.group(1) if m else None
+            continue
+        key, _, value = line.partition("=")
+        if name is None:
+            continue
+        if key.strip() == "url":
+            m = _GH_REMOTE.fullmatch(value.strip())
+            if m:
+                remotes[name] = m.group(1)
+        elif key.strip() == "gh-resolved" and value.strip() == "base":
+            chosen.add(name)
+    picks = {remotes[n] for n in chosen if n in remotes} or set(remotes.values())
+    return next(iter(picks)) if len(picks) == 1 else None
+
+
+def gh_refs(command: str, stdout: str = "", cwd: str | None = None) -> set[str]:
     """``gh pr view 12 --repo o/r`` that ran and printed something: the session looked at
-    o/r#12. Not when the text is an argument (``echo "gh pr view 12 ..."``) or the failure is
-    masked (``|| true``, ``2>/dev/null``) with nothing printed."""
+    o/r#12. Without ``--repo``, gh acts on the repo it runs in (``cwd``, after any ``cd``).
+    Not when the text is an argument (``echo "gh pr view 12 ..."``) or the failure is masked
+    (``|| true``, ``2>/dev/null``) with nothing printed."""
     urls: set[str] = set()
     if not stdout.strip() or re.search(r"\|\|\s*(?:true|:)\b", command):
         return urls
     listed: set[str] = set()  # repos whose PR/issue LIST ran in this command
-    for seg in _split_unquoted(command, pipes=True, newlines=True):
+    segments = _split_unquoted(command, pipes=True, newlines=True)
+    cwds = _segment_cwds(segments, cwd) if cwd else None
+    for i, seg in enumerate(segments):
         # gh must be the command run, possibly inside `X=$(...)`; not text in an echo or string.
         if not re.match(r"\s*(?:[A-Za-z_]\w*=)?(?:\$\(\s*)?(?:(?:timeout|env)\s+\S+\s+)*gh\s", seg):
             continue
-        ref, repo = _GH_REF.search(seg), _GH_REPO.search(seg)
+        ref, m = _GH_REF.search(seg), _GH_REPO.search(seg)
+        repo = m.group("repo") if m else None
+        if repo is None and ref and cwds and cwds[i]:
+            repo = _gh_repo_of(cwds[i])
         if ref and repo:
             for kind in ("pull", "issues"):  # GitHub serves a PR under both
-                urls.add(normalize_url(f"https://github.com/{repo.group('repo')}/{kind}/{ref.group('num')}"))
-        if repo and _GH_LIST.search(seg):
-            listed.add(repo.group("repo"))
+                urls.add(normalize_url(f"https://github.com/{repo}/{kind}/{ref.group('num')}"))
+        if m and _GH_LIST.search(seg):
+            listed.add(m.group("repo"))
     if len(listed) == 1:
         # `gh pr list --repo o/r`: each row the session saw ("10545  MERGED  2026-…  title") names
         # o/r#10545. A row counts only with a PR/issue state on it, so other numbers do not.
@@ -1580,7 +1637,7 @@ def _read_claude_stream(
                         got -= urls_in(cmd)  # `echo https://x` returns what the agent typed
                         out_text = tur.get("stdout") if isinstance(tur, dict) else _text_of(c.get("content"))
                         out_text = out_text if isinstance(out_text, str) else ""
-                        sess.urls |= gh_refs(cmd, out_text) | fetched_refs(cmd, out_text)
+                        sess.urls |= gh_refs(cmd, out_text, e.get("cwd") or sess.cwd) | fetched_refs(cmd, out_text)
                     sess.urls |= got
                     if _is_web_tool(name):
                         sess.urls |= urls_in(tin)
@@ -2231,7 +2288,7 @@ def _read_codex_stream(
             cmd = expand_assignments(args["cmd"])
             wd = args.get("workdir") if isinstance(args.get("workdir"), str) else None
             ecwd = os.path.join(cwd, wd) if wd and cwd and not os.path.isabs(wd) else (wd or cwd)
-            sess.urls |= gh_refs(cmd, stdout)
+            sess.urls |= gh_refs(cmd, stdout, ecwd)
             if not exit_code:
                 sess.urls |= fetched_refs(cmd, stdout)
             if exit_code:
