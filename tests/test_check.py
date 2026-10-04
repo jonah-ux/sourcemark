@@ -832,6 +832,44 @@ class GhListRefsTest(unittest.TestCase):
         cmd = "gh pr list --repo acme/app; gh pr list --repo acme/web"
         self.assertEqual(gh_refs(cmd, "12 OPEN title\n"), set())
 
+    def _repo(self, d, *remotes):
+        os.makedirs(os.path.join(d, ".git"))
+        with open(os.path.join(d, ".git", "config"), "w") as fh:
+            for name, url, extra in remotes:
+                fh.write(f'[remote "{name}"]\n\turl = {url}\n{extra}')
+
+    def test_bare_gh_view_uses_the_repo_it_runs_in(self):
+        from sourcemark.observe import gh_refs
+
+        with tempfile.TemporaryDirectory() as d:
+            self._repo(d, ("origin", "git@github.com:acme/app.git", ""))
+            os.makedirs(os.path.join(d, "src"))
+            # `cd` into the repo first, or run from a subdirectory of it
+            got = gh_refs(f"cd {d} && gh pr view 125 --json state", "MERGED\n", "/")
+            self.assertIn("https://github.com/acme/app/pull/125", got)
+            got = gh_refs("gh pr view 7", "OPEN\n", os.path.join(d, "src"))
+            self.assertIn("https://github.com/acme/app/pull/7", got)
+
+    def test_bare_gh_view_outside_a_github_repo_names_nothing(self):
+        from sourcemark.observe import gh_refs
+
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(gh_refs("gh pr view 7", "OPEN\n", d), set())  # no repo at all
+        with tempfile.TemporaryDirectory() as d:
+            self._repo(d, ("origin", "https://gitlab.com/acme/app.git", ""))
+            self.assertEqual(gh_refs("gh pr view 7", "OPEN\n", d), set())
+
+    def test_several_remotes_need_gh_default(self):
+        from sourcemark.observe import gh_refs
+
+        with tempfile.TemporaryDirectory() as d:
+            self._repo(d, ("origin", "https://github.com/me/app", ""), ("upstream", "https://github.com/acme/app.git", ""))
+            self.assertEqual(gh_refs("gh pr view 7", "OPEN\n", d), set())
+        with tempfile.TemporaryDirectory() as d:
+            self._repo(d, ("origin", "https://github.com/me/app", ""),
+                       ("upstream", "https://github.com/acme/app.git", "\tgh-resolved = base\n"))
+            self.assertIn("https://github.com/acme/app/pull/7", gh_refs("gh pr view 7", "OPEN\n", d))
+
 
 class ElidedSourceUrlTest(unittest.TestCase):
     def test_elided_url_in_tool_output_is_not_a_source(self):
