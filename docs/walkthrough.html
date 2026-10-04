@@ -72,8 +72,7 @@
     .result { display: grid; align-content: center; min-height: 270px; padding: 24px; border: 1px solid #294157; border-radius: 13px; background: linear-gradient(145deg, #122c39, #122038); }
     .result .state { color: var(--green); font: 800 clamp(2rem, 5vw, 4rem)/1 var(--mono); letter-spacing: -.08em; }
     .result p { max-width: 420px; color: var(--muted); }
-    .result strong { color: var(--ink); }
-    .result code { color: var(--yellow); }
+
     .controls { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
     .controls button.primary { color: var(--bg); border-color: var(--cyan); background: var(--cyan); }
     .controls button.primary:hover, .controls button.primary:focus-visible { color: var(--bg); background: #a0f3eb; }
@@ -95,39 +94,6 @@
       .timeline-step.active { border-color: var(--cyan); }
     }
 
-    .cohort-deck { position: relative; overflow: hidden; margin: 12px 0 30px; padding: 22px; border: 1px solid color-mix(in srgb, var(--deck-accent, var(--cyan, #72dcff)) 42%, var(--line, #263447)); border-radius: 22px; background: linear-gradient(135deg, color-mix(in srgb, var(--deck-accent, var(--cyan, #72dcff)) 10%, transparent), color-mix(in srgb, var(--panel, #101b2a) 94%, #000)); box-shadow: 0 24px 70px #0004; }
-    .cohort-deck::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: radial-gradient(circle at 88% 16%, color-mix(in srgb, var(--deck-accent, var(--cyan, #72dcff)) 22%, transparent), transparent 25%); opacity: .75; }
-    .cohort-deck > * { position: relative; z-index: 1; }
-    .cohort-deck-head { display: flex; align-items: start; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
-    .cohort-deck-kicker { color: var(--deck-accent, var(--cyan, #72dcff)); font: 800 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .18em; text-transform: uppercase; }
-    .cohort-deck h2 { margin: 7px 0 5px; font-size: clamp(1.25rem, 2.4vw, 2rem); letter-spacing: -.04em; }
-    .cohort-deck-intro { max-width: 700px; margin: 0; color: var(--muted, #91a0b2); font-size: .92rem; }
-    .cohort-deck-badge { display: flex; flex-wrap: wrap; justify-content: end; gap: 7px; color: var(--deck-accent, var(--cyan, #72dcff)); font: 700 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; text-transform: uppercase; }
-    .cohort-deck-badge span { border: 1px solid color-mix(in srgb, var(--deck-accent, var(--cyan, #72dcff)) 45%, var(--line, #263447)); border-radius: 999px; padding: 7px 9px; background: #ffffff08; }
-    .cohort-deck-body { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(220px, .8fr); gap: 18px; align-items: stretch; }
-    .cohort-deck-visual { min-height: 180px; display: grid; place-items: center; padding: 12px; border: 1px solid var(--line, #263447); border-radius: 16px; background: #050a12aa; }
-    .cohort-deck-visual svg { width: 100%; height: auto; max-height: 210px; }
-    .cohort-deck-route { fill: none; stroke: color-mix(in srgb, var(--deck-accent, var(--cyan, #72dcff)) 65%, #fff); stroke-width: 3; stroke-linecap: round; stroke-dasharray: 7 10; opacity: .72; }
-    .cohort-deck-node circle { fill: var(--panel-2, #152337); stroke: var(--line, #263447); stroke-width: 2; transition: fill .28s ease, stroke .28s ease, transform .28s ease; transform-box: fill-box; transform-origin: center; }
-    .cohort-deck-node text { fill: var(--muted, #91a0b2); font: 800 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; text-anchor: middle; }
-    .cohort-deck-node small { fill: var(--muted, #91a0b2); }
-    .cohort-deck-node[data-active='true'] circle { fill: color-mix(in srgb, var(--deck-accent, var(--cyan, #72dcff)) 28%, var(--panel-2, #152337)); stroke: var(--deck-accent, var(--cyan, #72dcff)); transform: scale(1.12); }
-    .cohort-deck-node[data-active='true'] text { fill: var(--deck-accent, var(--cyan, #72dcff)); }
-    .cohort-deck-node[data-complete='true'] circle { stroke: var(--deck-good, var(--mint, #9eeed0)); }
-    .cohort-deck-node[data-complete='true'] text { fill: var(--deck-good, var(--mint, #9eeed0)); }
-    .cohort-deck-axis { fill: var(--muted, #91a0b2); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; }
-    .cohort-deck-copy { display: flex; flex-direction: column; justify-content: space-between; padding: 16px 2px 12px 4px; }
-    .cohort-deck-copy h3 { margin: 7px 0 7px; font-size: 1.35rem; letter-spacing: -.04em; }
-    .cohort-deck-copy p { margin: 0; color: var(--muted, #91a0b2); font-size: .86rem; }
-    .cohort-deck-readout { margin-top: 16px; padding: 11px 12px; border-left: 3px solid var(--deck-good, var(--mint, #9eeed0)); background: #ffffff06; color: var(--deck-good, var(--mint, #9eeed0)); font: 700 .75rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
-    .cohort-deck-next { align-self: start; margin-top: 15px; border: 1px solid var(--deck-accent, var(--cyan, #72dcff)); border-radius: 10px; padding: 9px 12px; color: var(--deck-accent, var(--cyan, #72dcff)); background: #ffffff08; font: 800 .72rem ui-monospace, SFMono-Regular, Menlo, monospace; cursor: pointer; }
-    .cohort-deck-next:hover, .cohort-deck-next:focus-visible { outline: 2px solid color-mix(in srgb, var(--deck-accent, var(--cyan, #72dcff)) 35%, transparent); outline-offset: 2px; background: #ffffff12; }
-    .cohort-deck-tabs { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 18px; }
-    .cohort-deck-tab { border: 1px solid var(--line, #263447); border-radius: 999px; padding: 7px 10px; color: var(--muted, #91a0b2); background: transparent; font: 800 .67rem ui-monospace, SFMono-Regular, Menlo, monospace; cursor: pointer; }
-    .cohort-deck-tab[aria-selected='true'] { border-color: var(--deck-accent, var(--cyan, #72dcff)); color: var(--deck-accent, var(--cyan, #72dcff)); background: color-mix(in srgb, var(--deck-accent, var(--cyan, #72dcff)) 12%, transparent); }
-    .cohort-deck-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin-top: 14px; color: var(--muted, #91a0b2); font: .68rem ui-monospace, SFMono-Regular, Menlo, monospace; }
-    @media (max-width: 720px) { .cohort-deck-head { display: block; } .cohort-deck-badge { justify-content: start; margin-top: 12px; } .cohort-deck-body { grid-template-columns: 1fr; } .cohort-deck-copy { padding-left: 0; } }
-    @media (prefers-reduced-motion: reduce) { .cohort-deck-node circle, .cohort-deck-route { transition: none !important; animation: none !important; } }
 
   </style>
 </head>
@@ -142,28 +108,6 @@
         <button type="button" data-copy="git clone --branch v0.5.1 --depth 1 https://github.com/jonah-ux/sourcemark.git &amp;&amp; cd sourcemark &amp;&amp; python3 -m venv .venv &amp;&amp; . .venv/bin/activate &amp;&amp; python3 -m pip install . &amp;&amp; python3 demos/demo.py --installed">copy quickstart</button>
       </div>
     </header>
-    <section class="cohort-deck" data-cohort-deck="sourcemark" style="--deck-accent: var(--cyan); --deck-good: var(--green);" aria-labelledby="sourcemark-deck-title">
-      <div class="cohort-deck-head">
-        <div><div class="cohort-deck-kicker">launch deck / synthetic state explorer</div><h2 id="sourcemark-deck-title">Replay the citation route.</h2><p class="cohort-deck-intro">Tap a beat to see the mark travel from a source line to an honest readback. The rail is a browser-only fiction; the tagged demo remains the local witness.</p></div>
-        <div class="cohort-deck-badge"><span>local core</span><span id="sourcemark-deck-badge">MARK / MOVE / PROVE</span></div>
-      </div>
-      <div class="cohort-deck-body">
-        <div class="cohort-deck-visual">
-          <svg viewBox="0 0 640 190" role="img" aria-labelledby="sourcemark-rail-title sourcemark-rail-desc">
-            <title id="sourcemark-rail-title">MARK / MOVE / PROVE lifecycle rail</title><desc id="sourcemark-rail-desc">Three synthetic states connected in order; choose a state button to inspect its readback.</desc>
-            <path class="cohort-deck-route" d="M72 95 C135 35 199 155 262 95 S389 35 452 95 S579 155 622 95"/>
-            <g class="cohort-deck-node" data-node="0" data-active="true" data-complete="false" tabindex="-1"><circle cx="72" cy="95" r="28"/><text x="72" y="99">MARK</text></g><g class="cohort-deck-node" data-node="1" data-active="false" data-complete="false" tabindex="-1"><circle cx="262" cy="95" r="28"/><text x="262" y="99">MOVE</text></g><g class="cohort-deck-node" data-node="2" data-active="false" data-complete="false" tabindex="-1"><circle cx="452" cy="95" r="28"/><text x="452" y="99">PROVE</text></g>
-            <text class="cohort-deck-axis" x="20" y="166">START</text><text class="cohort-deck-axis" x="578" y="166">READ BACK</text>
-          </svg>
-        </div>
-        <div class="cohort-deck-copy" role="tabpanel" aria-live="polite">
-          <div><div class="cohort-deck-kicker" id="sourcemark-deck-kicker">beat 01 / mark</div><h3 id="sourcemark-deck-heading">Anchor the source</h3><p id="sourcemark-deck-copy">docs/lighthouse.md:4-5 becomes a compact [sm:7f3a9c2b1d] handle.</p><div class="cohort-deck-readout" id="sourcemark-deck-readout">anchor recorded · synthetic</div></div>
-          <button class="cohort-deck-next" type="button" data-deck-next>next beat →</button>
-        </div>
-      </div>
-      <div class="cohort-deck-tabs" role="tablist" aria-label="Synthetic guide beats"><button class="cohort-deck-tab" type="button" role="tab" aria-selected="true" data-deck-step="0">01 · MARK</button><button class="cohort-deck-tab" type="button" role="tab" aria-selected="false" data-deck-step="1">02 · MOVE</button><button class="cohort-deck-tab" type="button" role="tab" aria-selected="false" data-deck-step="2">03 · PROVE</button></div>
-      <div class="cohort-deck-foot"><span>Synthetic lifecycle: anchor → churn → resolve · no repository is scanned by this page.</span><span>illustrative browser state · no sibling install</span></div>
-    </section>
 
 
     <div class="section-label">01 / Watch the mark survive</div>
@@ -235,35 +179,6 @@
     });
   </script>
 
-<script>
-(() => {
-  const deck = document.querySelector('[data-cohort-deck="sourcemark"]');
-  if (!deck) return;
-  const steps = [{"label": "MARK", "heading": "Anchor the source", "copy": "docs/lighthouse.md:4-5 becomes a compact [sm:7f3a9c2b1d] handle.", "readout": "anchor recorded · synthetic"}, {"label": "MOVE", "heading": "Let the repository churn", "copy": "The fixture renames the file, inserts two lines, and edits one word.", "readout": "path shifted · source moved"}, {"label": "PROVE", "heading": "Resolve the claim", "copy": "Sourcemark finds the evidence again and reports edited / moved instead of guessing.", "readout": "edited / moved · readback"}];
-  const tabs = Array.from(deck.querySelectorAll('[data-deck-step]'));
-  const nodes = Array.from(deck.querySelectorAll('.cohort-deck-node'));
-  const kicker = deck.querySelector('#sourcemark-deck-kicker');
-  const heading = deck.querySelector('#sourcemark-deck-heading');
-  const copy = deck.querySelector('#sourcemark-deck-copy');
-  const readout = deck.querySelector('#sourcemark-deck-readout');
-  let current = 0;
-  function render(index) {
-    current = (index + steps.length) % steps.length;
-    const item = steps[current];
-    kicker.textContent = `beat ${String(current + 1).padStart(2, '0')} / ${item.label.toLowerCase()}`;
-    heading.textContent = item.heading;
-    copy.textContent = item.copy;
-    readout.textContent = item.readout;
-    tabs.forEach((tab, i) => tab.setAttribute('aria-selected', String(i === current)));
-    nodes.forEach((node, i) => {
-      node.dataset.active = String(i === current);
-      node.dataset.complete = String(i < current);
-    });
-  }
-  tabs.forEach((tab, i) => tab.addEventListener('click', () => render(i)));
-  deck.querySelector('[data-deck-next]').addEventListener('click', () => render(current + 1));
-  render(0);
-})();
-</script>
+
 </body>
 </html>
