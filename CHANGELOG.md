@@ -23,6 +23,10 @@
     command with a `||` fallback.
   - Google Docs/Drive `usp=` and YouTube `si=` share parameters no longer make a link a
     different page (`…/edit?usp=drivesdk` from the API, `…/edit` in the answer).
+  - `gh pr view 125` without `--repo` that ran and printed something sources the PR in the
+    repository it ran in (after any `cd`): that repo's only GitHub remote, or the one
+    `gh repo set-default` picked. Outside a GitHub repo, or with several remotes and no
+    default, it sources nothing.
 - A quoted path, URL, decorator or dotted name that misquotes the cited line by a character or
   two (`!MASTER-INDEXX.md`, `@classmethodX`, `p.settlement_revisionX`) is a `quote_mismatch`.
   Before, only bare names were soft-checked and these passed. A name the file has elsewhere
