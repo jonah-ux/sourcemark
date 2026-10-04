@@ -69,13 +69,15 @@ readiness.
 
 ## Usage
 
+Replace `PROJECT` and `SESSION` with the transcript you want to check.
+
 ```console
 sourcemark mark src/app.py:40-42              # → [sm:7f3a9c2b1d]
-sourcemark resolve [sm:7f3a9c2b1d]            # intact | shifted | moved | edited | orphaned
+sourcemark resolve '[sm:7f3a9c2b1d]'          # intact | shifted | moved | edited | orphaned
 sourcemark mark-row public.orders 1042 status total --dsn "$DATABASE_URL"
-sourcemark resolve [sm:…] --dsn "$DATABASE_URL"   # intact | drifted (changed: total) | deleted
-sourcemark check ~/.claude/projects/<project>/<session>.jsonl
-sourcemark check ~/.claude/projects/<project>/<session>.jsonl --export v1
+sourcemark resolve '[sm:…]' --dsn "$DATABASE_URL"   # intact | drifted (changed: total) | deleted
+sourcemark check "$HOME/.claude/projects/PROJECT/SESSION.jsonl"
+sourcemark check "$HOME/.claude/projects/PROJECT/SESSION.jsonl" --export v1
 sourcemark verify-ledger
 ```
 
