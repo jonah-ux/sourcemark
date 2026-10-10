@@ -11,3 +11,10 @@ and its raw results are kept outside this repository because they contain privat
 fixtures shipped here are synthetic.
 
 Released under the MIT license.
+
+<!-- agent-provenance
+agent: claude-code:studio:07349816-9a65-42c5-b724-2275f752918f
+node: studio
+written: 2026-10-07
+reasoning: agent-trace 07349816-9a65-42c5-b724-2275f752918f
+-->

@@ -54,3 +54,10 @@ Ledgers created before the timestamp was chained are read as chain v1 and say so
 `mark` events are written only by `put_mark()`; `append()` refuses them. A database rewritten
 wholesale, with a consistent chain, is only detectable against an anchor kept elsewhere:
 `verify-ledger --write-anchor FILE` after a clean check, then `--anchor FILE` later.
+
+<!-- agent-provenance
+agent: claude-code:studio:07349816-9a65-42c5-b724-2275f752918f
+node: studio
+written: 2026-10-07
+reasoning: agent-trace 07349816-9a65-42c5-b724-2275f752918f
+-->

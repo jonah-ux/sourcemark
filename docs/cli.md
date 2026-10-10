@@ -58,3 +58,10 @@ event was altered or removed.
 ## `sourcemark hook stop`
 
 Read a Stop-hook event (JSON) on stdin. See [hooks.md](hooks.md).
+
+<!-- agent-provenance
+agent: claude-code:studio:07349816-9a65-42c5-b724-2275f752918f
+node: studio
+written: 2026-10-07
+reasoning: agent-trace 07349816-9a65-42c5-b724-2275f752918f
+-->

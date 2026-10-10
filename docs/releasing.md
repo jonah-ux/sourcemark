@@ -26,3 +26,10 @@ No PyPI publication is implied by a GitHub release; the README installs from the
 The synthetic demo deliberately contains three unsupported citations. Its expected export state
 is `partial`, with two passing and three failing citations; publication checks require those
 refusals rather than treating the entire answer as verified.
+
+<!-- agent-provenance
+agent: claude-code:studio:07349816-9a65-42c5-b724-2275f752918f
+node: studio
+written: 2026-10-07
+reasoning: agent-trace 07349816-9a65-42c5-b724-2275f752918f
+-->

@@ -295,3 +295,10 @@ A third review found and fixed:
   - more URL params, Telegram, netrc, npmrc, docker and connection-string shapes
   - redaction is linear on long lines
 - **Ledger**: deleting the head/count rows with trailing events is caught through the event sequence
+
+<!-- agent-provenance
+agent: claude-code:studio:07349816-9a65-42c5-b724-2275f752918f
+node: studio
+written: 2026-10-07
+reasoning: agent-trace 07349816-9a65-42c5-b724-2275f752918f
+-->
