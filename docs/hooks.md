@@ -36,3 +36,10 @@ Subagent transcripts stored beside the session (`<session>/subagents/*.jsonl`) a
 `sourcemark check` accepts Claude Code's JSONL format. For other runtimes, build a `Session`
 from tool results with `sourcemark.observe.observe_tool(name, input, structured_result, content, cwd)`
 and call `sourcemark.check.check_text(answer, session)`.
+
+<!-- agent-provenance
+agent: claude-code:studio:07349816-9a65-42c5-b724-2275f752918f
+node: studio
+written: 2026-10-07
+reasoning: agent-trace 07349816-9a65-42c5-b724-2275f752918f
+-->

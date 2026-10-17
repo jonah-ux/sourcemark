@@ -18,3 +18,10 @@ Instructions for AI agents using or modifying Sourcemark.
 - Run `PYTHONPATH=src python3 -m unittest discover -s tests -v` before every commit.
 - Fixtures are synthetic. Never commit real paths, hostnames, transcripts, credentials, or database identifiers.
 - Accuracy changes need evidence: say which behaviour moved and by how much.
+
+<!-- agent-provenance
+agent: claude-code:studio:07349816-9a65-42c5-b724-2275f752918f
+node: studio
+written: 2026-10-07
+reasoning: agent-trace 07349816-9a65-42c5-b724-2275f752918f
+-->

@@ -158,3 +158,10 @@ paths, quotes, transcript text, URLs, raw mark tokens, or ledger contents. The o
 ## License
 
 MIT
+
+<!-- agent-provenance
+agent: claude-code:studio:07349816-9a65-42c5-b724-2275f752918f
+node: studio
+written: 2026-10-07
+reasoning: agent-trace 07349816-9a65-42c5-b724-2275f752918f
+-->
